@@ -7,6 +7,6 @@ fetch https://github.com/MetaSys-LISBP/IsoSim/tree/f489fac4e90ea2219fe460dcd7ccb
 (unpack it, if downloaded as an archive)
 
 copy the content of this repository over IsoSim (excluding README.md)
-Apply the patch.
+Apply the patch (patch -p0 -i add_on.patch).
 
 Run models/example_network/example_network.R and models/aracore_network/aracore_network.R
