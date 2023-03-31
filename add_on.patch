@@ -1,0 +1,1481 @@
+--- isosim/isosim.R
++++ isosim/isosim.R
+@@ -37,7 +37,7 @@
+   return(invisible(list(err=err)))
+ }
+ 
+-res_load <- load_pack(c("nnls", "numDeriv", "Matrix", "deSolve", "stringr", "RColorBrewer", "pso", "parallel"))
++res_load <- load_pack(c("nnls", "numDeriv", "Matrix", "deSolve", "stringr", "RColorBrewer", "pso", "parallel", "minpack.lm" ))
+ 
+ if (length(res_load$err)){
+   lpack <- paste(res_load$err, collapse="', '")
+@@ -1914,7 +1914,7 @@
+     }
+     
+     # get summary
+-    res_subsystems <- lapply(lapply(res_fluxes, "[[", 6), "[[", 1)
++    #res_subsystems <- lapply(lapply(res_fluxes, "[[", 6), "[[", 1)
+     
+     # go back to the initial working directory
+     setwd(mainDir)
+@@ -1922,7 +1922,8 @@
+   }
+   
+   # return results
+-  return(list(res=res_fluxes, summary=res_subsystems))
++  # return(list(res=res_fluxes, summary=res_subsystems))
++  return(list(res=res_fluxes))
+ }
+ 
+ #################
+@@ -2233,6 +2234,26 @@
+   return(eq)
+ }
+ 
++# kfp exp model enr
++fn_enr_kfp <- function(par, times){
++  # Simulate labeling dynamics for a given isotopologue using a simple exponential decay
++  xpred <- 1-((1-par[1])*exp(-par[2]*times)+par[1])
++  return(xpred)
++}
++
++fn_enr_kfp_parinit <- function(x, times){
++  # Initialize parameters
++  par <- c(0.1, 1)
++  lower <- c(0, 0)
++  upper <- c(1, 100)
++  return(list(par=par, upper=upper, lower=lower))
++}
++
++fn_enr_kfp_eq <- function(m){
++  eq <- paste("2-1-((1-", m[1], ")*exp(-(", m[2], ")*(t))+",m[1],")", sep="")
++  return(eq)
++}
++
+ cost_labin_single <- function(par, id, times, fun_dyn){
+   # Simulate labeling dynamics for all isotopologues of the CID
+   return(sum((fun_dyn(par, times) - id)**2))
+@@ -2306,23 +2327,42 @@
+   return(params)
+ }
+ 
++.GlobalEnv$use_only_double_logistic <- FALSE
++.GlobalEnv$use_only_logistic <- FALSE
++.GlobalEnv$use_only_kfp <- FALSE
++
+ fit_enr_log_doublelog <- function(id, times, niter){
+   ctrl <- list(maxit=3000, trace=0, vectorize=TRUE, hybrid="improved", hybrid.control=list(trace=0, pgtol=1e-8, factr=1e-8))
+   resopt <- list(value=Inf)
+-  for (i in seq(niter)){
+-    par <- fn_doublelogistic_parinit(id)
+-    res_i <- psoptim(par=par$par, fn=cost_labin_enr, lower=par$lower, upper = par$upper, control=ctrl, id=id, times=times, fun_dyn=fn_doublelogistic)
+-    if (res_i$value < resopt$value){
+-      resopt <- res_i
+-      funSet <- list(sim=fn_doublelogistic, eq=fn_doublelogistic_eq)
+-    }
+-  }
+-  for (i in seq(niter)){
+-    par <- fn_enr_logistic_parinit(id, times=times)
+-    res_i <- psoptim(par=par$par, fn=cost_labin_enr, lower=par$lower, upper = par$upper, control=ctrl, id=id, times=times, fun_dyn=fn_enr_logistic)
+-    if (res_i$value < resopt$value){
+-      resopt <- res_i
+-      funSet <- list(sim=fn_enr_logistic, eq=fn_enr_logistic_eq)
++  if (!.GlobalEnv$use_only_logistic && !.GlobalEnv$use_only_kfp) {
++    print("double_logistic")
++    for (i in seq(niter)){
++      par <- fn_doublelogistic_parinit(id)
++      res_i <- psoptim(par=par$par, fn=cost_labin_enr, lower=par$lower, upper = par$upper, control=ctrl, id=id, times=times, fun_dyn=fn_doublelogistic)
++      if (res_i$value < resopt$value){
++        resopt <- res_i
++        funSet <- list(sim=fn_doublelogistic, eq=fn_doublelogistic_eq)
++      }
++    }
++  }
++  if (!.GlobalEnv$use_only_double_logistic && !.GlobalEnv$use_only_kfp) {
++    for (i in seq(niter)){
++      par <- fn_enr_logistic_parinit(id, times=times)
++      res_i <- psoptim(par=par$par, fn=cost_labin_enr, lower=par$lower, upper = par$upper, control=ctrl, id=id, times=times, fun_dyn=fn_enr_logistic)
++      if (res_i$value < resopt$value){
++        resopt <- res_i
++        funSet <- list(sim=fn_enr_logistic, eq=fn_enr_logistic_eq)
++      }
++    }
++  }
++  if (!.GlobalEnv$use_only_logistic && !.GlobalEnv$use_only_double_logistic) {
++    for (i in seq(niter)){
++      par <- fn_enr_kfp_parinit(id, times=times)
++      res_i <- psoptim(par=par$par, fn=cost_labin_enr, lower=par$lower, upper = par$upper, control=ctrl, id=id, times=times, fun_dyn=fn_enr_kfp)
++      if (res_i$value < resopt$value){
++        resopt <- res_i
++        funSet <- list(sim=fn_enr_kfp, eq=fn_enr_kfp_eq)
++      }
+     }
+   }
+   return(list(resopt=resopt, funSet=funSet))
+@@ -2756,3 +2796,45 @@
+   }
+   parallel::clusterExport(cl, ls(all.names=TRUE, envir = env), envir = env)
+ }
++
++calc_formula <- function(t, formula) {
++  eval(parse(text=paste0("calc_formula_function = function(t) { return (",formula,")}")))
++  return(calc_formula_function(t))
++}
++
++fluxratio_simple3 <- function(times, a_t, b_t, z_t, formula_z, pz){
++  dz_t = c()
++  for (t in times) {
++    dz_t = c(dz_t, 1000*(calc_formula(t+0.001, formula_z) - calc_formula(t, formula_z)))
++  }
++  v_start_value = 1
++  v_1_2_l = c(v1=0, v2=0)
++  v_1_2_u = c(v1=100, v2=100)
++  df1 <- data.frame(t = times, a = a_t, b = b_t, z = z_t, dz = dz_t)
++  m1 = nls( dz ~ (v1*a + v2*b -(v1+v2)*z)/pz, data = df1, start = c(v1 = v_start_value, v2 = v_start_value), lower = v_1_2_l, upper = v_1_2_u, trace = F, algorithm="port" )
++  return(m1)
++}
++
++kfp_simple <- function(t, v_u_part, w_u_part) {
++  out <- tryCatch({
++    df1 <- data.frame(t, v_u_part)
++    m1 = nls( v_u_part ~ (1-alpha)*exp(-1*k_v*t) + alpha, data = df1, start = c(alpha = 0.1, k_v = 0.3), lower = c(alpha=0, k_v=0.01), upper = c(alpha=1, k_v=100), trace = F, algorithm="port" )
++    pars1 = m1$m$getPars()
++    alpha = as.numeric(pars1["alpha"])
++    k_v = as.numeric(pars1["k_v"])
++    df2 <- data.frame(t, w_u_part)
++    m2 = nlsLM( w_u_part ~ ((1-alpha)*(1-beta)/(k_v-k_w))*(k_v*exp(-1*k_w*t) - k_w*exp(-1*k_v*t)) + (1-(1-alpha)*(1-beta)), data = df2, start = c(beta=0.1, k_w=0.3), 
++                lower = c(beta=0, k_w=0.01), upper = c(beta=1, k_w=100), trace = F, algorithm="port" )
++    return(m2$m$getPars())
++  },
++  error=function(cond) {
++    message(cond)
++    # Choose a return value in case of error
++    return(NA)
++  },
++  warning=function(cond) {
++    message(cond)
++    # Choose a return value in case of warning
++    return(NULL)
++  })
++}
+
+--- models/example_network/example_network.R
++++ models/example_network/example_network.R
+@@ -10,13 +10,6 @@
+ # License: GNU General Public License v3 (see license.txt for details)
+ 
+ ####################################
+-cat("
+-This code calculates fluxes through several subsystems of the
+-example network shown in figure 1A of the ScalaFlux publication.
+-
+-It also generates figures 3 and 4.
+-
+-")
+ ####################################
+ 
+ ####################################
+@@ -29,7 +22,17 @@
+ library("vioplot")
+ 
+ # Path of the example model
+-#setwd("C:/Users/millard/Documents/GIT/IsoSim/IsoSim/models/example_network")
++for (level in seq(-1,-6)) {
++     this_files_name = sys.frame(-level)$srcfile;
++     if(!is.null(this_files_name)) {
++       setwd(dirname(test$filename))
++       break
++     }
++}
++
++if(is.null(this_files_name)) {
++  print(paste0("Could not determine folder of current script, wd stays: ",getwd()))
++}
+ 
+ # Get current directory
+ wd <- getwd()
+@@ -55,7 +58,18 @@
+ numCores <- detectCores()
+ 
+ # number of Monte Carlo iterations for flux calculation
+-mc_iter <- 4
++mc_iter <- 100
++
++
++
++
++
++
++
++
++
++
++
+ 
+ 
+ ####################################
+@@ -118,13 +132,14 @@
+ 
+ # fluxes and metabolite concentrations
+ fluxes <- c("v1"=2, "v2"=1.5, "v6"=1.2, "v10"=1.0, "v6xch"=0.2)
+-meta_conc <- c("Sout"=1, "Sin"=0.5, "A"=0.5, "B"=0.5, "C"=0.5, "D"=0.5, "E"=0.5, "F"=0.5, "G"=0.5, "H"=0.5, "I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5, "M"=0.5, "N"=0.5, "O"=0.5, "P"=20)
++meta_conc_org <- c("Sout"=1, "Sin"=0.5, "A"=0.5, "B"=0.5, "C"=0.5, "D"=0.5, "E"=0.5, "F"=0.5, "G"=0.5, "H"=0.5, "I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5, "M"=0.5, "N"=0.5, "O"=0.5, "P"=20)
++all_mets = c("Sout_1", "Sin_1", "A_1", "B_1", "C_1", "D_1", "E_1", "F_1", "G_1", "H_1-2", "H_2", "H_1", "I_1", "J_1", "K_1", "L_1", "M_1", "N_1", "O_1")
+ 
+ # simulation times (exponential sampling frequency from 0 to 15 min)
+-times <- round(10**(seq(0, log10(16), length.out=30))-1, 2)
++times161 <- round(10**(seq(0, log10(16), length.out=161))-1, 2)
+ 
+ # run simulations
+-res <- simulate(net       = net,
++res_sim161_org <- simulate(net       = net,
+                 kp        = fluxes,
+                 anFun     = anFun,
+                 p         = 0.0,
+@@ -132,26 +147,24 @@
+                 meta_conc = meta_conc,
+                 method    = "FORTRAN",
+                 unloadDll = TRUE,
+-                times     = times)
++                times     = times161)
+ 
++subset_times = seq(1,161,5)
+ 
++run_fit_input <- function() {
+ ####################################
+-cat("\n   ... fit labeling dynamics of all metabolites ...\n\n")
++    cat("\n   ... fit labeling dynamics of the relevant metabolites ...\n\n")
+ ####################################
+ 
+ # fit analytical functions to the labeling dynamics of all metabolites
+-enr_input <- res$res_dyn$enrichments[,c("Sout_1", "Sin_1", "A_1", "B_1", "C_1", "D_1", "E_1", "F_1", "G_1", "H_1-2", "H_2", "H_1", "I_1", "J_1", "K_1", "L_1", "M_1", "N_1", "O_1")]
++    enr_input <- res_sim161$res_dyn$enrichments[subset_times,all_mets]
+ 
+-# fit analytical functions to the labeling dynamics of all metabolites
+-enr_in <- fit_label_input(enr_input, t=times, file="res_fit_enr", mc.cores=numCores)
++    # # fit analytical functions to the labeling dynamics of all metabolites
++    .GlobalEnv$enr_in <- fit_label_input(enr_input, t=times161[subset_times], file="res_fit_enr", mc.cores=numCores)
++}
+ 
+ 
+-####################################
+-cat("\n   ... calculate fluxes for all minimal subsystems ...\n\n")
+-####################################
+-
+-# definition of all minimal subsystems to analyze
+-# here, fluxes and pools are estimated for all minimal subsystems of the network provided as example
++create_subsystems <- function(times, enr_in, mc_iter) {
+ subsystems <- list(
+     s1 = list(name = "s1",
+               rxn_subnet = list(r1   = list("R"=c("Sout", "Sin"), "C"=c(-1, 1), "E"="v1", "T"=c("A", "A")),
+@@ -167,7 +180,7 @@
+               anFun = NULL,
+               niter = mc_iter,
+               mc.cores = NULL,
+-              data_meas_subnet = list(conc=c("Sin"=0.5), iso=cbind(times, "Sin_1"=res$res_dyn$enrichments[, "Sin_1"]))),
++                  data_meas_subnet = list(conc=c("Sin"=0.5), iso=cbind(times, "Sin_1"= res_sim161$res_dyn$enrichments[subset_times, "Sin_1"]))),
+     
+     s2 = list(name = "s2",
+               rxn_subnet = list(r2   = list("R"=c("Sin", "A"), "C"=c(-1, 1), "E"="v2", "T"=c("A", "A")),
+@@ -183,7 +196,7 @@
+               anFun = NULL,
+               niter = mc_iter,
+               mc.cores = NULL,
+-              data_meas_subnet = list(conc=c("A"=0.5), iso=cbind(times, "A_1"=res$res_dyn$enrichments[, "A_1"]))),
++                  data_meas_subnet = list(conc=c("A"=0.5), iso=cbind(times, "A_1"=res_sim161$res_dyn$enrichments[subset_times, "A_1"]))),
+     
+     s3 = list(name = "s3",
+               rxn_subnet = list(r3   = list("R"=c("Sin", "D"), "C"=c(-1, 1), "E"="v3", "T"=c("A", "A")),
+@@ -199,7 +212,7 @@
+               anFun = NULL,
+               niter = mc_iter,
+               mc.cores = NULL,
+-              data_meas_subnet = list(conc=c("D"=0.5), iso=cbind(times, "D_1"=res$res_dyn$enrichments[, "D_1"]))),
++                  data_meas_subnet = list(conc=c("D"=0.5), iso=cbind(times, "D_1"=res_sim161$res_dyn$enrichments[subset_times, "D_1"]))),
+     
+     s4_9 = list(name = "s4_9",
+                 rxn_subnet = list(r4   = list("R"=c("A", "F"), "C"=c(-1, 1), "E"="v4",    "T"=c("A", "A")),
+@@ -216,7 +229,7 @@
+                 anFun = NULL,
+                 niter = mc_iter,
+                 mc.cores = NULL,
+-                data_meas_subnet = list(conc=c("F"=0.5), iso=cbind(times, "F_1"=res$res_dyn$enrichments[, "F_1"]))),
++                    data_meas_subnet = list(conc=c("F"=0.5), iso=cbind(times, "F_1"=res_sim161$res_dyn$enrichments[subset_times, "F_1"]))),
+     
+     s5 = list(name = "s5",
+               rxn_subnet = list(r5    = list("R"=c("A", "B"), "C"=c(-1, 1), "E"="v5",     "T"=c("A", "A")),
+@@ -233,7 +246,7 @@
+               anFun = NULL,
+               niter = mc_iter,
+               mc.cores = NULL,
+-              data_meas_subnet = list(conc=c("B"=0.5), iso=cbind(times, "B_1"=res$res_dyn$enrichments[, "B_1"]))),
++                  data_meas_subnet = list(conc=c("B"=0.5), iso=cbind(times, "B_1"=res_sim161$res_dyn$enrichments[subset_times, "B_1"]))),
+     
+     s6_7 = list(name = "s6_7",
+                 rxn_subnet = list(r6for = list("R"=c("B", "C"), "C"=c(-1, 1), "E"="v6f",    "T"=c("A", "A")),
+@@ -250,7 +263,7 @@
+                 anFun = NULL,
+                 niter = mc_iter,
+                 mc.cores = NULL,
+-                data_meas_subnet = list(conc=c("C"=0.5), iso=cbind(times, "C_1"=res$res_dyn$enrichments[, "C_1"]))),
++                    data_meas_subnet = list(conc=c("C"=0.5), iso=cbind(times, "C_1"=res_sim161$res_dyn$enrichments[subset_times, "C_1"]))),
+     
+     s8 = list(name = "s8",
+               rxn_subnet = list(r8     = list("R"=c("C", "E"), "C"=c(-1, 1), "E"="v8",      "T"=c("A", "A")),
+@@ -266,7 +279,7 @@
+               anFun = NULL,
+               niter = mc_iter,
+               mc.cores = NULL,
+-              data_meas_subnet = list(conc=c("E"=0.5), iso=cbind(times, "E_1"=res$res_dyn$enrichments[, "E_1"]))),
++                  data_meas_subnet = list(conc=c("E"=0.5), iso=cbind(times, "E_1"=res_sim161$res_dyn$enrichments[subset_times, "E_1"]))),
+     
+     s10 = list(name = "s10",
+                rxn_subnet = list(r10for = list("R"=c("E", "G"), "C"=c(-1, 1), "E"="v10", "T"=c("A", "A")),
+@@ -282,7 +295,7 @@
+                anFun = NULL,
+                niter = mc_iter,
+                mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("G"=0.5), iso=cbind(times, "G_1"=res$res_dyn$enrichments[, "G_1"]))),
++                   data_meas_subnet = list(conc=c("G"=0.5), iso=cbind(times, "G_1"=res_sim161$res_dyn$enrichments[subset_times, "G_1"]))),
+     
+     s11 = list(name = "s11",
+                rxn_subnet = list(r11  = list("R"=c("G", "K", "H"), "C"=c(-1, -1, 1), "E"="v11", "T"=c("A", "B", "AB")),
+@@ -298,7 +311,7 @@
+                anFun = NULL,
+                niter = mc_iter,
+                mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("H"=0.5), iso=cbind(times, "H_1-2"=res$res_dyn$enrichments[, "H_1-2"]))),
++                   data_meas_subnet = list(conc=c("H"=0.5), iso=cbind(times, "H_1-2"=res_sim161$res_dyn$enrichments[subset_times, "H_1-2"]))),
+     
+     s12 = list(name = "s12",
+                rxn_subnet = list(r12   = list("R"=c("H", "I", "J"),"C"=c(-1, 1, 1), "E"="v12", "T"=c("AB", "B", "A")),
+@@ -315,7 +328,7 @@
+                anFun = NULL,
+                niter = mc_iter,
+                mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("I"=0.5, "J"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("I_1", "J_1")]))),
++                   data_meas_subnet = list(conc=c("I"=0.5, "J"=0.5), iso=cbind(times, res_sim161$res_dyn$enrichments[subset_times, c("I_1", "J_1")]))),
+     
+     s13 = list(name = "s13",
+                rxn_subnet = list(r13  = list("R"=c("I", "K"), "C"=c(-1, 1), "E"="v13", "T"=c("A", "A")),
+@@ -331,7 +344,7 @@
+                anFun = NULL,
+                niter = mc_iter,
+                mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("K"=0.5), iso=cbind(times, "K_1"=res$res_dyn$enrichments[, "K_1"]))),
++                   data_meas_subnet = list(conc=c("K"=0.5), iso=cbind(times, "K_1"=res_sim161$res_dyn$enrichments[subset_times, "K_1"]))),
+     
+     s14 = list(name = "s14",
+                rxn_subnet = list(r14  = list("R"=c("J", "L"), "C"=c(-1, 1), "E"="v14", "T"=c("A", "A")),
+@@ -347,7 +360,7 @@
+                anFun = NULL,
+                niter = mc_iter,
+                mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("L"=0.5), iso=cbind(times, "L_1"=res$res_dyn$enrichments[, "L_1"]))),
++                   data_meas_subnet = list(conc=c("L"=0.5), iso=cbind(times, "L_1"=res_sim161$res_dyn$enrichments[subset_times, "L_1"]))),
+     
+     s15 = list(name = "s15",
+                rxn_subnet = list(r15  = list("R"=c("L", "M"), "C"=c(-1, 1), "E"="v15", "T"=c("A", "A")),
+@@ -363,7 +376,7 @@
+                anFun = NULL,
+                niter = mc_iter,
+                mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("M"=0.5), iso=cbind(times, "M_1"=res$res_dyn$enrichments[, "M_1"]))),
++                   data_meas_subnet = list(conc=c("M"=0.5), iso=cbind(times, "M_1"=res_sim161$res_dyn$enrichments[subset_times, "M_1"]))),
+     
+     s16 = list(name = "s16",
+                rxn_subnet = list(r16  = list("R"=c("M", "N"), "C"=c(-1, 1), "E"="v16", "T"=c("A", "A")),
+@@ -379,7 +392,7 @@
+                anFun = NULL,
+                niter = mc_iter,
+                mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("N"=0.5), iso=cbind(times, "N_1"=res$res_dyn$enrichments[, "N_1"]))),
++                   data_meas_subnet = list(conc=c("N"=0.5), iso=cbind(times, "N_1"=res_sim161$res_dyn$enrichments[subset_times, "N_1"]))),
+     
+     s17_18 = list(name = "s17_18",
+                   rxn_subnet = list(r17  = list("R"=c("N", "O"), "C"=c(-1, 1), "E"="v17",     "T"=c("A", "A")),
+@@ -396,7 +409,7 @@
+                   anFun = NULL,
+                   niter = mc_iter,
+                   mc.cores = NULL,
+-                  data_meas_subnet = list(conc=c("O"=0.5), iso=cbind(times, "O_1"=res$res_dyn$enrichments[, "O_1"]))),
++                      data_meas_subnet = list(conc=c("O"=0.5), iso=cbind(times, "O_1"=res_sim161$res_dyn$enrichments[subset_times, "O_1"]))),
+     
+     s19 = list(name = "s19",
+                rxn_subnet = list(r19  = list("R"=c("O", "P"), "C"=c(-1, 1), "E"="v19", "T"=c("A", "A")),
+@@ -412,654 +425,459 @@
+                anFun = NULL,
+                niter = mc_iter,
+                mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("P"=20), iso=cbind(times, "P_1"=res$res_dyn$enrichments[, "P_1"])))
++                   data_meas_subnet = list(conc=c("P"=20), iso=cbind(times, "P_1"=res_sim161$res_dyn$enrichments[subset_times, "P_1"])))
+ )
++}
++
++run_one_estimation <- function() {
++    
++    ####################################
++    cat("\n   ... calculate fluxes for all minimal subsystems ...\n\n")
++    ####################################
++    
++    # definition of all minimal subsystems to analyze
++    # here, fluxes and pools are estimated for all minimal subsystems of the network provided as example
++    subsystems = create_subsystems(enr_in = enr_in, times = times161[subset_times], mc_iter = NULL)
+ 
+ # calculate fluxes for all subsystems
+ res_sub <- fit_subsystems(subsystems, dirname="fit_minimal_subsystems", mc.cores=numCores)
++    return(res_sub)
++}
++
++kfp_subsystems = list(s2=c(s="Sin", p="A"), s3=c(s="Sin", p="D"), s8=c(s="C", p="E"), s10=c(s="E", p="G"),
++                      s13=c(s="I", p="K"), s14=c(s="J", p="L"), s15=c(s="L", p="M"), s16=c(s="M", p="N"))
++
++estimate_kfp <- function() {
++    kfp_res = list()
++    print(length(subset_times))
++    print(length(enr_in[["all"]][["Sin_1"]]$exp))
++    for (kfp_sub in names(kfp_subsystems)) {
++        v_part = t(enr_in[["all"]][[paste0(kfp_subsystems[[kfp_sub]][["s"]],"_1")]]$exp)
++        w_part = t(enr_in[["all"]][[paste0(kfp_subsystems[[kfp_sub]][["p"]], "_1")]]$exp)
++        kfp_res[[kfp_sub]] = kfp_simple(times161[subset_times], 1-v_part, 1-w_part)
++    }
++    return (kfp_res)
++}
+ 
+-# get summary
+-list2file(res_sub$summary, file="summary_minimal_subsystems.txt")
++estimate_flux_ratio <- function() {
++    fluxratio_res = list()
++    fluxratio_res[["v4_v9"]] = fluxratio_simple3(times = times161[subset_times], a_t = t(enr_in[["all"]][["A_1"]]$exp), 
++                      b_t = t(enr_in[["all"]][["E_1"]]$exp), z_t = t(enr_in[["all"]][["F_1"]]$exp),
++                      formula_z = enr_in$anFun[["F_1"]][["F_1-M1"]], pz = meta_conc_org[["F"]])
++    
++    fluxratio_res[["v18_v17"]] = fluxratio_simple3(times = times161[subset_times], a_t = t(enr_in[["all"]][["F_1"]]$exp), 
++                      b_t = t(enr_in[["all"]][["N_1"]]$exp), z_t = t(enr_in[["all"]][["O_1"]]$exp),
++                      formula_z = enr_in$anFun[["O_1"]][["O_1-M1"]], pz = meta_conc_org[["O"]])
++    return(fluxratio_res)
++}
++
++
++mc_iter = 100
++meta_conc_rel_sd = 0.05
++isotopomer_abs_sd = 0.02
++
++start_time <- Sys.time()
++meta_conc_rel_noise = 1
++isotopomer_abs_noise = 0
++timepoint_selections = list(seq(1,161,32), seq(1,161,16), seq(1,161,8), seq(1,161,2))
++names(timepoint_selections) = c("6", "11", "21", "81")
++all_enr_in = list(list(), list(), list(), list())
++names(all_enr_in) = c("6", "11", "21", "81")
++all_res_iso = list(list(), list(), list(), list())
++names(all_res_iso) = c("6", "11", "21", "81")
++all_res_kfp = list(list(), list(), list(), list())
++names(all_res_kfp) = c("6", "11", "21", "81")
++all_res_ratio = list(list(), list(), list(), list())
++names(all_res_ratio) = c("6", "11", "21", "81")
++
++for (mc_run in seq(mc_iter+1)) {
++    meta_conc = meta_conc_org * meta_conc_rel_noise
++    res_sim161$res_dyn$enrichments <- res_sim161_org$res_dyn$enrichments + isotopomer_abs_noise
++    res_sim161$res_dyn$enrichments[res_sim161$res_dyn$enrichments <0] <- 0
++    res_sim161$res_dyn$enrichments[res_sim161$res_dyn$enrichments >1] <- 1
++    for (name in names(timepoint_selections)) {
++        .GlobalEnv$subset_times = timepoint_selections[[name]]
++        print(paste0("Run #",as.character(mc_run), " for  " ,name, " timepoints"))
++        run_fit_input()
++        all_enr_in[[name]][[as.character(mc_run)]] = enr_in
++        enr_in = all_enr_in_1_101[[name]][[as.character(mc_run)]]
++        res_iso = run_one_estimation()
++        all_res_iso[[name]][[as.character(mc_run)]] = res_iso
++        res_kfp = estimate_kfp()
++        all_res_kfp[[name]][[as.character(mc_run)]] = res_kfp
++        res_ratio = estimate_flux_ratio()
++        all_res_ratio[[name]][[as.character(mc_run)]] = res_ratio
++    }
++    # set noise here, so the first run is without noise
++    meta_conc_rel_noise = rnorm(length(as.numeric(meta_conc_org)), mean=1.0, sd=meta_conc_rel_sd)
++    isotopomer_abs_noise = rnorm(length(as.numeric(res_sim161_org$res_dyn$enrichments)), mean=0, sd=isotopomer_abs_sd)
++}
++end_time <- Sys.time()
++end_time - start_time
++
++# go back to the initial working directory
++setwd(wd)
+ 
+ ####################################
+-cat("\n      ... plot results ...\n\n")
++cat("\nDone.\n")
+ ####################################
+ 
+-all_cols <- fun_col(length(res_sub$res))
+-cols <- c()
+-data_plot <- list()
+-opt <- c()
+-ci95p <- c()
+-ci95m <- c()
+-for (i in seq(length(res_sub$res))){
+-    n <- names(res_sub$res)[i]
+-    a <- colnames(res_sub$res[[i]]$sens$par)
+-    ncol <- grep("v", a)
+-    # colors
+-    cols <- c(cols, rep(all_cols[i], length(ncol)))
+-    # get optimal value
+-    no <- names(opt)
+-    opt <- c(opt, res_sub$summary[[n]][ncol, "opt"])
+-    names(opt) <- c(no, a[ncol])
+-    # get higher bound of 95% CI
+-    nci95p <- names(ci95p)
+-    ci95p <- c(ci95p, res_sub$summary[[n]][ncol, "ci_97.5"])
+-    names(ci95p) <- c(no, a[ncol])
+-    # get lower bound of 95% CI
+-    nci95m <- names(ci95m)
+-    ci95m <- c(ci95m, res_sub$summary[[n]][ncol, "ci_2.5"])
+-    names(ci95m) <- c(no, a[ncol])
+-    if (length(ncol) == 1){
+-        data_plot[[a[1]]] <- res_sub$res[[i]]$sens$par[,ncol]
+-    }else if (length(ncol)>1){
+-        data_plot <- c(data_plot, as.list(as.data.frame(res_sub$res[[i]]$sens$par[,ncol])))
+-    }
++flux_names =      c("v1", "v2", "v3", "v4",   "v9",   "v5", "v6r","v6f", "v7",   "v8", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17",    "v18",    "v19")
++subsystem_names = c("s1", "s2", "s3", "s4_9", "s4_9", "s5", "s5", "s6_7","s6_7", "s8", "s10", "s11", "s12", "s13", "s14", "s15", "s16", "s17_18", "s17_18", "s19")
++estimate_data = list()
++p_value_data = list()
++for (fn_i in seq(length(flux_names))) {
++	for (tp in c("6", "11", "21", "81")) {
++	    fn = flux_names[fn_i]
++	    sn = subsystem_names[fn_i]
++	    fn_tp = paste0(fn,"_",tp)
++	    estimate_data[[fn_tp]] = c()
++	    for (i in seq(1,101)) {
++		estimate_data[[fn_tp]][i] = all_res_iso_1_101[[tp]][[as.character(i)]][["res"]][[sn]][["result"]][["par"]][[fn]]
++		p_value_data[[fn_tp]][i] = all_res_iso_1_101[[tp]][[as.character(i)]][["res"]][[sn]][["chi2"]][["p-value, i.e. P(X^2<=value)"]]
++	    }
++	}
+ }
+-odn <- names(data_plot)
+-true_values <- c(v1=2, v2=1.5, v3=0.5, v4=0.3, v5=1.2, v6r=0.25, v6f=1.45, v7=0.5, v8=1.7, v9=0.7, v10=1.0, v11=1, v12=1, v13=1, v14=1, v15=1, v16=1, v17=1, v18=1, v19=2)
+ 
+-# supplementary Figure S1
+-pdf(file="Fig_S1.pdf", width=10, height=8)
+-par(mfrow=c(4,5))
+-for (i in names(enr_in$all)){
+-    plot(times, enr_in$all[[i]]$exp, las=1, main=i, ylim=c(0,1), xlab="time", ylab="13C-enrichment", type="p", pch=20)
+-    lines(x=seq(from=min(times), to=max(times), length.out=100), enr_in$all[[i]]$sim)
++kfp_estimate_data = list()
++for (kfp_sub in names(kfp_subsystems)) {
++	for (tp in c("6", "11", "21", "81")) {
++	    kfp_sub_tp = paste0(kfp_sub,"_",tp)
++	    print(kfp_sub_tp)
++	    kfp_estimate_data[[kfp_sub_tp]] = c()
++	    for (i in seq(1,101)) {
++		kfp_estimate_data[[kfp_sub_tp]][i] = NA
++		tryCatch({ kfp_estimate_data[[kfp_sub_tp]][i] = all_res_kfp[[tp]][[as.character(i)]][[kfp_sub]][["k_w"]]*meta_conc[kfp_subsystems[[kfp_sub]][["p"]]] },
++		         error=function(cond) {
++		             message(cond)
++		             # Choose a return value in case of error
++		             return(NA)
++		         },
++		         warning=function(cond) {
++		             message(cond)
++		             # Choose a return value in case of warning
++		             return(NULL)
++		         })
++	    }
++	}
+ }
++
++
++# 
++log_estimate_data = list();
++for (fn_tp in names(estimate_data)) { log_estimate_data[[fn_tp]] = log(estimate_data[[fn_tp]],10) }
++log_kfp_estimate_data = list();
++for (fn_tp in names(kfp_estimate_data)) { log_kfp_estimate_data[[fn_tp]] = log(kfp_estimate_data[[fn_tp]],10) }
++log_p_value_data = list();
++for (fn_tp in names(estimate_data)) { for (i in seq(length(p_value_data[[fn_tp]]))) { log_p_value_data[[fn_tp]][[i]] = max(-5,log(p_value_data[[fn_tp]][[i]],10)) } }
++conf_interval_data = list();
++for (fn_tp in names(estimate_data)) { conf_interval_data[[fn_tp]] = quantile(estimate_data[[fn_tp]][seq(2,101)],probs=c(0.025,0.975)) }
++conf_interval_diff = list();
++for (fn_tp in names(conf_interval_data)) { conf_interval_diff[[fn_tp]] = conf_interval_data[[fn_tp]][2]-conf_interval_data[[fn_tp]][2] }
++conf_interval_rel = list();
++for (fn_tp in names(conf_interval_data)) { conf_interval_rel[[fn_tp]] = conf_interval_data[[fn_tp]][2]/conf_interval_data[[fn_tp]][1] }
++conf_interval_rel_log = list();
++for (fn_tp in names(conf_interval_data)) { conf_interval_rel_log[[fn_tp]] = log(conf_interval_data[[fn_tp]][2]/conf_interval_data[[fn_tp]][1],10) }
++
++fluxes <- c(v1=2, v2=1.5, v3=0.5, v4=0.3, v5=1.2, v6r=0.25, v6f=1.45, v7=0.5, v8=1.7,
++            v9=0.7, v10=1.0, v11=1, v12=1, v13=1, v14=1, v15=1, v16=1, v17=1, v18=1, v19=2)
++print_steps = c(0,6,13,20)
++
++plot_figure5 <- function() {
++    for (i_pr in seq(3)) {
++        pdf(file=paste0("Fig_5b",as.character(i_pr),".pdf"), width=10, height=6)
++        colors = rep(fun_col(print_steps[i_pr+1]-print_steps[i_pr]), each=4)
++        for (c_i in seq(length(colors))) {
++            colors[c_i] = paste0(colors[c_i], as.hexmode(80+((c_i-1) %% 4)*48))
++        }
++        vioplot(lapply(log_estimate_data[seq(print_steps[i_pr]*4+1, print_steps[i_pr+1]*4)],function(li) na.omit(li)),col = colors, ylim=c(-4,1))
++        true_values = rep(log(fluxes[flux_names[seq(print_steps[i_pr]+1,print_steps[i_pr+1])]],10), each=4)
++        #        points(x=19,y=-3, pch=4, col="black", cex=3)
++        points(true_values, pch=4, col="black", cex=3)
++        #        tmp=unlist(log_estimate_data[seq(print_steps[i_pr]*4+1, print_steps[i_pr+1]*4)])
++        #        opt_estimates = tmp[seq(1,length(tmp),101)]
++        #opt_estimates = unlist(lapply(log_estimate_data[seq(print_steps[i_pr]*4+1, print_steps[i_pr+1]*4)], function(l) l[[1]]))
++        #        points(opt_estimates, pch=5, col="black", cex=1.7)
++        #        points(x=19,y=-3.5, pch=5, col="black", cex=1.7)
+ dev.off()
++    }
++}
+ 
+-# supplementary Figure S2
+-pdf(file="Fig_S2.pdf", width=10, height=8)
+-par(mfrow=c(4,5))
+-for (i in names(subsystems)){
+-    i_mes <- subsystems[[i]]$data_meas_subnet
+-    i_mes_e <- i_mes$iso[,-1]
+-    i_sim_all <- res_sub$res[[i]]$result$retres$sim
+-    if (is.matrix(i_mes_e)){
+-        matplot(times, i_mes_e, las=1, main=i, ylim=c(0,1), xlab="time", ylab="13C-enrichment", type="p", pch=20)
+-        matlines(times, i_sim_all)
+-    }else{
+-        plot(times, i_mes_e, las=1, main=i, ylim=c(0,1), xlab="time", ylab="13C-enrichment", type="p", pch=20)
+-        lines(times, i_sim_all)
++kfp_fluxes = c(1.5,0.5,1.7,1.0,1.0,1.0,1.0,1.0)
++
++
++plot_figure6 <- function() {
++    pdf(file=paste0("Fig_6.pdf"), width=10, height=6)
++    colors = rep(fun_col(length(kfp_subsystems)), each=4)
++    for (c_i in seq(length(colors))) {
++        colors[c_i] = paste0(colors[c_i], as.hexmode(80+((c_i-1) %% 4)*48))
++    }
++    vioplot(lapply(log_kfp_estimate_data,function(li) na.omit(li)),col = colors, ylim=c(-4,1))
++    true_values = rep(log(kfp_fluxes,10), each=4)
++    points(true_values, pch=4, col="black", cex=3)
++    dev.off()
++}
++
++kfp_v_u_part <- function(t, alpha, kv) {
++    ret = (1-alpha)*exp(-1*kv*t) + alpha
++}
++
++fluxratio_fluxes = c(1.5,0.5)
++
++plot_figure6b <- function() {
++    pdf(file=paste0("Fig_6b.pdf"), width=10, height=6)
++    colors = rep(fun_col(2), each=4)
++    for (c_i in seq(length(colors))) {
++        colors[c_i] = paste0(colors[c_i], as.hexmode(80+((c_i-1) %% 4)*48))
+     }
++    vioplot(lapply(log_fluxratio_estimate_data,function(li) na.omit(li)),col = colors, ylim=c(-4,1))
++    true_values = rep(log(kfp_fluxes,10), each=4)
++    points(true_values, pch=4, col="black", cex=3)
++	dev.off()
+ }
++
++
++subs_of_interest = array( c("s2",       "s4_9",   "s6_7",   "s5",     "s6_7",   "s4_9",   "s17_18", "s11",    "s13",    "s14",    "s11",   "s15",    "s16",    "s17_18", "s19",
++                            "Sin_1-M1", "A_1-M1", "B_1-M1", "C_1-M1", "D_1-M1", "E_1-M1", "F_1-M1", "G_1-M1", "I_1-M1", "J_1-M1", "K_1-M1","L_1-M1", "M_1-M1", "N_1-M1", "O_1-M1"), dim=c(15,2))
++
++analyze_an_funs <- function() {
++    org_data = res_sim161_org$res_dyn$isotopologues
++
++    an_fun_diff_sumsq = list()
++    an_fun_diff = list()
++    an_fun_res = list()
++    for (j in seq(dim(subs_of_interest)[1])) {
++        an_fun_diff_sub = subs_of_interest[j,2]
++        for (tp in c("6", "11", "21", "81")) {
++        #for (tp in c("6")) {
++            an_fun_diff_sub_tp = paste0(an_fun_diff_sub,"_",tp)
++            for (i in seq(1,101)) {
++                res_current = calc_input(times161, all_res_iso_1_101[[tp]][[as.character(i)]], subs_of_interest[j,1], subs_of_interest[j,2] )
++                diff_current = res_current - org_data[,subs_of_interest[j,2]]
++                an_fun_diff_sumsq[[an_fun_diff_sub_tp]][[i]] = sum(diff_current*diff_current)
++                an_fun_diff[[an_fun_diff_sub_tp]][[i]] = diff_current
++                an_fun_res[[an_fun_diff_sub_tp]][[i]] = res_current
++            }
++        }
++    }
++    vioplot(an_fun_diff_sumsq[seq(49,60)], ylim=c(0,10))
++    
++    plot(an_fun_res[["A_1-M1_6"]][[1]],pch=20)
++    for (i in seq(2,101)) { points(an_fun_res[["A_1-M1_6"]][[i]], pch=20)}
++    points(org_data[,"A_1-M1"], pch=20, col="green")
++    plot(an_fun_res[["A_1-M1_11"]][[1]],pch=20)
++    for (i in seq(2,101)) { points(an_fun_res[["A_1-M1_11"]][[i]], pch=20)}
++    points(org_data[,"A_1-M1"], pch=20, col="green")
++    plot(an_fun_res[["s17_18_6"]][[1]],pch=20)
++    for (i in seq(2,101)) { points(an_fun_res[["s17_18_6"]][[i]], pch=20)}
++    points(org_data[,"N_1-M1"], pch=20, col="green")
++    plot(an_fun_res[["s15_6"]][[1]],pch=20)
++    for (i in seq(2,101)) { points(an_fun_res[["s15_6"]][[i]], pch=20)}
++    points(org_data[,"L_1-M1"], pch=20, col="green")
++    plot(an_fun_res[["s15_11"]][[1]],pch=20)
++    for (i in seq(2,101)) { points(an_fun_res[["s15_11"]][[i]], pch=20)}
++    points(org_data[,"L_1-M1"], pch=20, col="green")
++    plot(an_fun_res[["s15_21"]][[1]],pch=20)
++    for (i in seq(2,101)) { points(an_fun_res[["s15_21"]][[i]], pch=20)}
++    points(org_data[,"L_1-M1"], pch=20, col="green")
++    plot(an_fun_res[["s15_81"]][[1]],pch=20)
++    for (i in seq(2,101)) { points(an_fun_res[["s15_81"]][[i]], pch=20)}
++    points(org_data[,"L_1-M1"], pch=20, col="green")
++}
++
++# A,D,H,L,O
++
++
++.GlobalEnv$use_only_double_logistic <- FALSE
++.GlobalEnv$use_only_logistic <- FALSE
++.GlobalEnv$use_only_kfp <- FALSE
++
++start_time <- Sys.time()
++mc_iter = 20
++
++all_enr_in_logistic = list(list(), list(), list(), list())
++all_enr_in_double_logistic = list(list(), list(), list(), list())
++all_enr_in_kfp = list(list(), list(), list(), list())
++
++for (mc_run in seq(mc_iter+1)) {
++    for (name in names(timepoint_selections)) {
++        subset_times = timepoint_selections[[name]]
++        print(paste0("Run #",as.character(mc_run), " for  " ,name, " timepoints"))
++        enr_input <- array(seq(5*length(subset_times)), dim=c(length(subset_times),5))
++        enr_input[,1] = all_enr_in_1_101[[name]][[as.character(i)]][["all"]][["A_1"]][["exp"]]
++        enr_input[,2] = all_enr_in_1_101[[name]][[as.character(i)]][["all"]][["D_1"]][["exp"]]
++        enr_input[,3] = all_enr_in_1_101[[name]][[as.character(i)]][["all"]][["H_1"]][["exp"]]
++        enr_input[,4] = all_enr_in_1_101[[name]][[as.character(i)]][["all"]][["L_1"]][["exp"]]
++        enr_input[,5] = all_enr_in_1_101[[name]][[as.character(i)]][["all"]][["O_1"]][["exp"]]
++        colnames(enr_input) = c("A_1", "D_1", "H_1", "L_1", "O_1")
++        #print(enr_input)
++         .GlobalEnv$use_only_double_logistic <- TRUE
++         all_enr_in_double_logistic[[name]][[as.character(mc_run)]] <- fit_label_input(enr_input, t=times161[subset_times], file="res_fit_enr", mc.cores=numCores)
++         .GlobalEnv$use_only_double_logistic <- FALSE
++        .GlobalEnv$use_only_kfp <- TRUE
++        all_enr_in_kfp[[name]][[as.character(mc_run)]] <- fit_label_input(enr_input, t=times161[subset_times], file="res_fit_enr", mc.cores=numCores)
++        .GlobalEnv$use_only_kfp <- FALSE
++        
++    }
++}
++end_time <- Sys.time()
++end_time - start_time
++
++calc_input2 <- function(times, formula) {
++    eval(parse(text=paste0("calc_function = function(t) { return (",formula,")}")))
++    return(calc_function(times))
++}
++
++
++
++subs_of_interest = array( c( "A_1",    "D_1",    "L_1",    "O_1",
++                             "A_1-M1", "D_1-M1", "L_1-M1", "O_1-M1"), dim=c(4,2))
++
++analyze_an_alternative_funs <- function() {
++    org_data = res_sim161_org$res_dyn$isotopologues
++    
++    an_dl_fun_res = list()
++    an_kfp_fun_res = list()
++    for (j in seq(dim(subs_of_interest)[1])) {
++        an_fun_diff_sub = subs_of_interest[j,2]
++        for (tp in c("6", "11", "21", "81")) {
++            #for (tp in c("6")) {
++            an_fun_diff_sub_tp = paste0(an_fun_diff_sub,"_",tp)
++            for (i in seq(1,21)) {
++                res_current = calc_input2(times161, all_enr_in_double_logistic[[tp]][[as.character(i)]][["all"]][[subs_of_interest[j,1]]][["anFun"]][[subs_of_interest[j,2]]] )
++                an_dl_fun_res[[an_fun_diff_sub_tp]][[i]] = res_current
++                res_current = calc_input2(times161, all_enr_in_kfp[[tp]][[as.character(i)]][["all"]][[subs_of_interest[j,1]]][["anFun"]][[subs_of_interest[j,2]]] )
++                an_kfp_fun_res[[an_fun_diff_sub_tp]][[i]] = res_current
++            }
++            pdf(file=paste0("Fig_new_3_dl_",an_fun_diff_sub_tp,".pdf"), width=10, height=6)
++            plot(x=times161, y=an_dl_fun_res[[an_fun_diff_sub_tp]][[1]],pch=20, ylim=c(0,1), type="l")
++            for (i in seq(2,21)) { lines(x=times161, y=an_dl_fun_res[[an_fun_diff_sub_tp]][[i]], pch=20)}
++            lines(x=times161, y=org_data[,subs_of_interest[j,2]], pch=20, col="green", lwd=4)
++            dev.off()
++            pdf(file=paste0("Fig_new_3_kfp_",an_fun_diff_sub_tp,".pdf"), width=10, height=6)
++            plot(x=times161, y=an_kfp_fun_res[[an_fun_diff_sub_tp]][[1]],pch=20, ylim=c(0,1), type="l")
++            for (i in seq(2,21)) { lines(x=times161, y=an_kfp_fun_res[[an_fun_diff_sub_tp]][[i]], pch=20)}
++            lines(x=times161, y=org_data[,subs_of_interest[j,2]], pch=20, col="green", lwd=4)
++			dev.off()
++        }
++    }
++}
++analyze_an_alternative_funs();
++
++colors = rep(fun_col(3), each=4)
++for (c_i in seq(length(colors))) {
++    colors[c_i] = paste0(colors[c_i], as.hexmode(80+((c_i-1) %% 4)*48))
++}
++
++pdf(file=paste0("Fig_new_2C2.pdf"), width=10, height=6)
++
++vioplot(an_fun_diff_sumsq[seq(45,56)], ylim=c(0,0.2), col=colors)
+ dev.off()
+ 
+-# plot Figure 3B
+-pdf(file="Fig_3B.pdf", width=7, height=6)
+-    plot(x=true_values[odn], y=opt[odn], xlim=c(0,2.5), col=cols, ylim=c(0,2.5), las=1, yaxs="i", xaxs="i", pch=16, xlab="true value", ylab="estimated value")
+-    abline(c(0,0), 1, lwd=2, lty=2)
+-    cor_res <- cor.test(x=true_values[odn], y=opt[odn], method = "pearson")
+-    points(x=true_values[odn], y=opt[odn], bg=cols, pch=21, cex=2)
+-    text(x=0.5, y=2, labels=paste("R2 = ", round(cor_res$estimate, 2), "\np = ", signif(cor_res$p.value, 2), sep=""))
++
++
++pdf(file="Fig_new_2C_L_6.pdf", width=10, height=6)
++plot(x=times161,y=an_fun_res[["L_1-M1_6"]][[1]],type="l", ylim=c(0,1))
++for (i in seq(2,51)) { lines(x=times161,y=an_fun_res[["L_1-M1_6"]][[i]], ylim=c(0,1))}
++lines(x=times161,y=org_data[,"L_1-M1"], col="green",lwd=4, ylim=c(0,1))
+ dev.off()
+ 
+-# plot Figure 3C
+-pdf(file="Fig_3C.pdf", width=10, height=6)
+-    vioplot(data_plot[odn], names=odn, col=cols, las=2, ylim=c(0,2.5), outline=FALSE)
+-    points(true_values[odn], pch=16, col="red")
++pdf(file="Fig_new_2C_L_11.pdf", width=10, height=6)
++plot(x=times161,y=an_fun_res[["L_1-M1_11"]][[1]],type="l", ylim=c(0,1))
++for (i in seq(2,51)) { lines(x=times161,y=an_fun_res[["L_1-M1_11"]][[i]], ylim=c(0,1))}
++lines(x=times161,y=org_data[,"L_1-M1"], col="green",lwd=4, ylim=c(0,1))
+ dev.off()
+ 
++pdf(file="Fig_new_2C_L_21.pdf", width=10, height=6)
++plot(x=times161,y=an_fun_res[["L_1-M1_21"]][[1]],type="l", ylim=c(0,1))
++for (i in seq(2,51)) { lines(x=times161,y=an_fun_res[["L_1-M1_21"]][[i]], ylim=c(0,1))}
++lines(x=times161,y=org_data[,"L_1-M1"], col="green",lwd=4, ylim=c(0,1))
++dev.off()
+ 
+-####################################
+-cat("\n   ... calculate the flux through the pathway r9-r16 based on different subsystems ...\n\n")
+-####################################
++pdf(file="Fig_new_2C_L_81.pdf", width=10, height=6)
++plot(x=times161,y=an_fun_res[["L_1-M1_81"]][[1]],type="l", ylim=c(0,1))
++for (i in seq(2,51)) { lines(x=times161,y=an_fun_res[["L_1-M1_81"]][[i]], ylim=c(0,1))}
++lines(x=times161,y=org_data[,"L_1-M1"], col="green",lwd=4, ylim=c(0,1))
++dev.off()
+ 
+-subsystems_l2 <- list(
+-    S1 = list(name = "S1",
+-                 rxn_subnet = list(r10  = list("R"=c("E", "G"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                   rout = list("R"=c("G"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-                 meta_conc_subnet = c("E"=1, "G"=0.5),
+-                 kp_subnet = c("v10"=0.5),
+-                 te_subnet = c("v10", "G"),
+-                 te_upc_subnet = c("v10"=10, "G"=100),
+-                 te_loc_subnet = c("v10"=1e-4, "G"=0.01),
+-                 sd_meas = list(iso=0.02, conc=c("G"=0.01)),
+-                 times = times,
+-                 enr_in = enr_in,
+-                 niter = mc_iter,
+-                 mc.cores = NULL,
+-                 data_meas_subnet = list(conc=c("G"=0.5), iso=cbind(times, "G_1"=res$res_dyn$enrichments[, "G_1"]))),
+-    S2 = list(name = "S2",
+-                 rxn_subnet = list(r10  = list("R"=c("E", "G"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                   r11  = list("R"=c("G", "K", "H"), "C"=c(-1, -1, 1), "E"="v10",  "T"=c("A", "B", "BA")),
+-                                   rout = list("R"=c("H"),           "C"=c(-1),        "E"="v10",  "T"=c("AB"))),
+-                 meta_conc_subnet = c("E"=1, "G"=0.5, "H"=0.5, "K"=1),
+-                 kp_subnet = c("v10"=0.5),
+-                 te_subnet = c("v10", "G", "H"),
+-                 te_upc_subnet = c("v10"=10, "G"=100, "H"=100),
+-                 te_loc_subnet = c("v10"=1e-4, "G"=0.01, "H"=0.01),
+-                 sd_meas = list(iso=0.02, conc=c("G"=0.01, "H"=0.01)),
+-                 times = times,
+-                 enr_in = enr_in,
+-                 niter = mc_iter,
+-                 mc.cores = NULL,
+-                 data_meas_subnet = list(conc=c("G"=0.5, "H"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("G_1", "H_1-2")]))),
+-    S3 = list(name = "S3",
+-                 rxn_subnet = list(r10  = list("R"=c("E", "G"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                   r11  = list("R"=c("G", "K", "H"), "C"=c(-1, -1, 1), "E"="v10",  "T"=c("A", "B", "BA")),
+-                                   r12  = list("R"=c("H", "I", "J"), "C"=c(-1, 1, 1),  "E"="v10",  "T"=c("AB", "B", "A")),
+-                                   rout1 = list("R"=c("I"),           "C"=c(-1),        "E"="v10",  "T"=c("A")),
+-                                   rout2 = list("R"=c("J"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-                 meta_conc_subnet = c("E"=1, "G"=0.5, "H"=0.5, "I"=0.5, "J"=0.5, "K"=1),
+-                 kp_subnet = c("v10"=0.5),
+-                 te_subnet = c("v10", "G", "H", "I", "J"),
+-                 te_upc_subnet = c("v10"=10, "G"=100, "H"=100, "I"=100, "J"=100),
+-                 te_loc_subnet = c("v10"=1e-4, "G"=0.01, "H"=0.01, "I"=0.01, "J"=0.01),
+-                 sd_meas = list(iso=0.02, conc=c("G"=0.01, "H"=0.01, "I"=0.01, "J"=0.01)),
+-                 times = times,
+-                 enr_in = enr_in,
+-                 niter = mc_iter,
+-                 mc.cores = NULL,
+-                 data_meas_subnet = list(conc=c("G"=0.5, "H"=0.5, "I"=0.5, "J"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("G_1", "H_1-2", "I_1", "J_1")]))),
+-    S4 = list(name = "S4",
+-                 rxn_subnet = list(r10  = list("R"=c("E", "G"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                   r11  = list("R"=c("G", "K", "H"), "C"=c(-1, -1, 1), "E"="v10",  "T"=c("A", "B", "BA")),
+-                                   r12  = list("R"=c("H", "I", "J"), "C"=c(-1, 1, 1),  "E"="v10",  "T"=c("AB", "B", "A")),
+-                                   r13  = list("R"=c("I", "K"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("B", "B")),
+-                                   rout = list("R"=c("J"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-                 meta_conc_subnet = c("E"=1, "G"=0.5, "H"=0.5, "I"=0.5, "J"=0.5, "K"=0.5),
+-                 kp_subnet = c("v10"=0.5),
+-                 te_subnet = c("v10", "G", "H", "I", "J", "K"),
+-                 te_upc_subnet = c("v10"=10, "G"=100, "H"=100, "I"=100, "J"=100, "K"=100),
+-                 te_loc_subnet = c("v10"=1e-4, "G"=0.01, "H"=0.01, "I"=0.01, "J"=0.01, "K"=0.01),
+-                 sd_meas = list(iso=0.02, conc=c("G"=0.01, "H"=0.01, "I"=0.01, "J"=0.01, "K"=0.01)),
+-                 times = times,
+-                 enr_in = enr_in,
+-                 niter = mc_iter,
+-                 mc.cores = NULL,
+-                 data_meas_subnet = list(conc=c("G"=0.5, "H"=0.5, "I"=0.5, "J"=0.5, "K"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("G_1", "H_1-2", "I_1", "J_1", "K_1")]))),
+-    S5 = list(name = "S5",
+-                 rxn_subnet = list(r10  = list("R"=c("E", "G"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                   r11  = list("R"=c("G", "K", "H"), "C"=c(-1, -1, 1), "E"="v10",  "T"=c("A", "B", "BA")),
+-                                   r12  = list("R"=c("H", "I", "J"), "C"=c(-1, 1, 1),  "E"="v10",  "T"=c("AB", "B", "A")),
+-                                   r13  = list("R"=c("I", "K"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("B", "B")),
+-                                   r14  = list("R"=c("J", "L"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                   rout = list("R"=c("L"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-                 meta_conc_subnet = c("E"=1, "G"=0.5, "H"=0.5, "I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5),
+-                 kp_subnet = c("v10"=0.5),
+-                 te_subnet = c("v10", "G", "H", "I", "J", "K", "L"),
+-                 te_upc_subnet = c("v10"=10, "G"=100, "H"=100, "I"=100, "J"=100, "K"=100, "L"=100),
+-                 te_loc_subnet = c("v10"=1e-4, "G"=0.01, "H"=0.01, "I"=0.01, "J"=0.01, "K"=0.01, "L"=0.01),
+-                 sd_meas = list(iso=0.02, conc=c("G"=0.01, "H"=0.01, "I"=0.01, "J"=0.01, "K"=0.01, "L"=0.01)),
+-                 times = times,
+-                 enr_in = enr_in,
+-                 niter = mc_iter,
+-                 mc.cores = NULL,
+-                 data_meas_subnet = list(conc=c("G"=0.5, "H"=0.5, "I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("G_1", "H_1-2", "I_1", "J_1", "K_1", "L_1")]))),
+-    S6 = list(name = "S6",
+-                 rxn_subnet = list(r10  = list("R"=c("E", "G"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                   r11  = list("R"=c("G", "K", "H"), "C"=c(-1, -1, 1), "E"="v10",  "T"=c("A", "B", "BA")),
+-                                   r12  = list("R"=c("H", "I", "J"), "C"=c(-1, 1, 1),  "E"="v10",  "T"=c("AB", "B", "A")),
+-                                   r13  = list("R"=c("I", "K"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("B", "B")),
+-                                   r14  = list("R"=c("J", "L"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                   r15  = list("R"=c("L", "M"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                   rout = list("R"=c("M"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-                 meta_conc_subnet = c("E"=1, "G"=0.5, "H"=0.5, "I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5, "M"=0.5),
+-                 kp_subnet = c("v10"=0.5),
+-                 te_subnet = c("v10", "G", "H", "I", "J", "K", "L", "M"),
+-                 te_upc_subnet = c("v10"=10, "G"=100, "H"=100, "I"=100, "J"=100, "K"=100, "L"=100, "M"=100),
+-                 te_loc_subnet = c("v10"=1e-4, "G"=0.01, "H"=0.01, "I"=0.01, "J"=0.01, "K"=0.01, "L"=0.01, "M"=0.01),
+-                 sd_meas = list(iso=0.02, conc=c("G"=0.01, "H"=0.01, "I"=0.01, "J"=0.01, "K"=0.01, "L"=0.01, "M"=0.01)),
+-                 times = times,
+-                 enr_in = enr_in,
+-                 niter = mc_iter,
+-                 mc.cores = NULL,
+-                 data_meas_subnet = list(conc=c("G"=0.5, "H"=0.5, "I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5, "M"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("G_1", "H_1-2", "I_1", "J_1", "K_1", "L_1", "M_1")]))),
+-    S7 = list(name = "S7",
+-               rxn_subnet = list(r10  = list("R"=c("E", "G"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 r11  = list("R"=c("G", "K", "H"), "C"=c(-1, -1, 1), "E"="v10",  "T"=c("A", "B", "BA")),
+-                                 r12  = list("R"=c("H", "I", "J"), "C"=c(-1, 1, 1),  "E"="v10",  "T"=c("AB", "B", "A")),
+-                                 r13  = list("R"=c("I", "K"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("B", "B")),
+-                                 r14  = list("R"=c("J", "L"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 r15  = list("R"=c("L", "M"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 r16  = list("R"=c("M", "N"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 rout = list("R"=c("N"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-               meta_conc_subnet = c("E"=1, "G"=0.5, "H"=0.5, "I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5, "M"=0.5, "N"=0.5),
+-               kp_subnet = c("v10"=0.5),
+-               te_subnet = c("v10", "G", "H", "I", "J", "K", "L", "M", "N"),
+-               te_upc_subnet = c("v10"=10, "G"=100, "H"=100, "I"=100, "J"=100, "K"=100, "L"=100, "M"=100, "N"=100),
+-               te_loc_subnet = c("v10"=1e-4, "G"=0.01, "H"=0.01, "I"=0.01, "J"=0.01, "K"=0.01, "L"=0.01, "M"=0.01, "N"=0.01),
+-               sd_meas = list(iso=0.02, conc=c("G"=0.01, "H"=0.01, "I"=0.01, "J"=0.01, "K"=0.01, "L"=0.01, "M"=0.01, "N"=0.01)),
+-               times = times,
+-               enr_in = enr_in,
+-               niter = mc_iter,
+-               mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("G"=0.5, "H"=0.5, "I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5, "M"=0.5, "N"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("G_1", "H_1-2", "I_1", "J_1", "K_1", "L_1", "M_1", "N_1")]))),
+-    S8 = list(name = "S8",
+-               rxn_subnet = list(r11  = list("R"=c("G", "K", "H"), "C"=c(-1, -1, 1), "E"="v10",  "T"=c("A", "B", "BA")),
+-                                 rout = list("R"=c("H"),           "C"=c(-1),        "E"="v10",  "T"=c("AB"))),
+-               meta_conc_subnet = c("G"=1, "H"=0.5, "K"=1),
+-               kp_subnet = c("v10"=0.5),
+-               te_subnet = c("v10", "H"),
+-               te_upc_subnet = c("v10"=10, "H"=100),
+-               te_loc_subnet = c("v10"=1e-4, "H"=0.01),
+-               sd_meas = list(iso=0.02, conc=c("H"=0.01)),
+-               times = times,
+-               enr_in = enr_in,
+-               niter = mc_iter,
+-               mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("H"=0.5), iso=cbind(times, "H_1-2"=res$res_dyn$enrichments[, "H_1-2"]))),
+-    S9 = list(name = "S9",
+-              rxn_subnet = list(r11  = list("R"=c("G", "K", "H"), "C"=c(-1, -1, 1), "E"="v10",  "T"=c("A", "B", "BA")),
+-                                r12  = list("R"=c("H", "I", "J"), "C"=c(-1, 1, 1),  "E"="v10",  "T"=c("AB", "B", "A")),
+-                                rout1 = list("R"=c("I"),           "C"=c(-1),        "E"="v10",  "T"=c("A")),
+-                                rout2 = list("R"=c("J"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-              meta_conc_subnet = c("G"=1, "H"=0.5, "I"=0.5, "J"=0.5, "K"=1),
+-              kp_subnet = c("v10"=0.5),
+-              te_subnet = c("v10", "H", "I", "J"),
+-              te_upc_subnet = c("v10"=10, "H"=100, "I"=100, "J"=100),
+-              te_loc_subnet = c("v10"=1e-4, "H"=0.01, "I"=0.01, "J"=0.01),
+-              sd_meas = list(iso=0.02, conc=c("H"=0.01, "I"=0.01, "J"=0.01)),
+-              times = times,
+-              enr_in = enr_in,
+-              niter = mc_iter,
+-              mc.cores = NULL,
+-              data_meas_subnet = list(conc=c("H"=0.5, "I"=0.5, "J"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("H_1-2", "I_1", "J_1")]))),
+-    S10 = list(name = "S10",
+-               rxn_subnet = list(r11  = list("R"=c("G", "K", "H"), "C"=c(-1, -1, 1), "E"="v10",  "T"=c("A", "B", "BA")),
+-                                 r12  = list("R"=c("H", "I", "J"), "C"=c(-1, 1, 1),  "E"="v10",  "T"=c("AB", "B", "A")),
+-                                 r13  = list("R"=c("I", "K"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("B", "B")),
+-                                 rout = list("R"=c("J"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-               meta_conc_subnet = c("G"=1, "H"=0.5, "I"=0.5, "J"=0.5, "K"=0.5),
+-               kp_subnet = c("v10"=0.5),
+-               te_subnet = c("v10", "H", "I", "J", "K"),
+-               te_upc_subnet = c("v10"=10, "H"=100, "I"=100, "J"=100, "K"=100),
+-               te_loc_subnet = c("v10"=1e-4, "H"=0.01, "I"=0.01, "J"=0.01, "K"=0.01),
+-               sd_meas = list(iso=0.02, conc=c("H"=0.01, "I"=0.01, "J"=0.01, "K"=0.01)),
+-               times = times,
+-               enr_in = enr_in,
+-               niter = mc_iter,
+-               mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("H"=0.5, "I"=0.5, "J"=0.5, "K"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("H_1-2", "I_1", "J_1", "K_1")]))),
+-    S11 = list(name = "S11",
+-               rxn_subnet = list(r11  = list("R"=c("G", "K", "H"), "C"=c(-1, -1, 1), "E"="v10",  "T"=c("A", "B", "BA")),
+-                                 r12  = list("R"=c("H", "I", "J"), "C"=c(-1, 1, 1),  "E"="v10",  "T"=c("AB", "B", "A")),
+-                                 r13  = list("R"=c("I", "K"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("B", "B")),
+-                                 r14  = list("R"=c("J", "L"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 rout = list("R"=c("L"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-               meta_conc_subnet = c("G"=1, "H"=0.5, "I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5),
+-               kp_subnet = c("v10"=0.5),
+-               te_subnet = c("v10", "H", "I", "J", "K", "L"),
+-               te_upc_subnet = c("v10"=10, "H"=100, "I"=100, "J"=100, "K"=100, "L"=100),
+-               te_loc_subnet = c("v10"=1e-4, "H"=0.01, "I"=0.01, "J"=0.01, "K"=0.01, "L"=0.01),
+-               sd_meas = list(iso=0.02, conc=c("H"=0.01, "I"=0.01, "J"=0.01, "K"=0.01, "L"=0.01)),
+-               times = times,
+-               enr_in = enr_in,
+-               niter = mc_iter,
+-               mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("H"=0.5, "I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("H_1-2", "I_1", "J_1", "K_1", "L_1")]))),
+-    S12 = list(name = "S12",
+-               rxn_subnet = list(r11  = list("R"=c("G", "K", "H"), "C"=c(-1, -1, 1), "E"="v10",  "T"=c("A", "B", "BA")),
+-                                 r12  = list("R"=c("H", "I", "J"), "C"=c(-1, 1, 1),  "E"="v10",  "T"=c("AB", "B", "A")),
+-                                 r13  = list("R"=c("I", "K"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("B", "B")),
+-                                 r14  = list("R"=c("J", "L"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 r15  = list("R"=c("L", "M"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 rout = list("R"=c("M"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-               meta_conc_subnet = c("G"=1, "H"=0.5, "I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5, "M"=0.5),
+-               kp_subnet = c("v10"=0.5),
+-               te_subnet = c("v10", "H", "I", "J", "K", "L", "M"),
+-               te_upc_subnet = c("v10"=10, "H"=100, "I"=100, "J"=100, "K"=100, "L"=100, "M"=100),
+-               te_loc_subnet = c("v10"=1e-4, "H"=0.01, "I"=0.01, "J"=0.01, "K"=0.01, "L"=0.01, "M"=0.01),
+-               sd_meas = list(iso=0.02, conc=c("H"=0.01, "I"=0.01, "J"=0.01, "K"=0.01, "L"=0.01, "M"=0.01)),
+-               times = times,
+-               enr_in = enr_in,
+-               niter = mc_iter,
+-               mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("H"=0.5, "I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5, "M"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("H_1-2", "I_1", "J_1", "K_1", "L_1", "M_1")]))),
+-    S13 = list(name = "S13",
+-               rxn_subnet = list(r11  = list("R"=c("G", "K", "H"), "C"=c(-1, -1, 1), "E"="v10",  "T"=c("A", "B", "BA")),
+-                                 r12  = list("R"=c("H", "I", "J"), "C"=c(-1, 1, 1),  "E"="v10",  "T"=c("AB", "B", "A")),
+-                                 r13  = list("R"=c("I", "K"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 r14  = list("R"=c("J", "L"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 r15  = list("R"=c("L", "M"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 r16  = list("R"=c("M", "N"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 rout = list("R"=c("N"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-               meta_conc_subnet = c("G"=1, "H"=0.5, "I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5, "M"=0.5, "N"=0.5),
+-               kp_subnet = c("v10"=0.5),
+-               te_subnet = c("v10", "H", "I", "J", "K", "L", "M", "N"),
+-               te_upc_subnet = c("v10"=10, "H"=100, "I"=100, "J"=100, "K"=100, "L"=100, "M"=100, "N"=100),
+-               te_loc_subnet = c("v10"=1e-4, "H"=0.01, "I"=0.01, "J"=0.01, "K"=0.01, "L"=0.01, "M"=0.01, "N"=0.01),
+-               sd_meas = list(iso=0.02, conc=c("H"=0.01, "I"=0.01, "J"=0.01, "K"=0.01, "L"=0.01, "M"=0.01, "N"=0.01)),
+-               times = times,
+-               enr_in = enr_in,
+-               niter = mc_iter,
+-               mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("H"=0.5, "I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5, "M"=0.5, "N"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("H_1-2", "I_1", "J_1", "K_1", "L_1", "M_1", "N_1")]))),
+-    S14 = list(name = "S14",
+-              rxn_subnet = list(r12  = list("R"=c("H", "I", "J"), "C"=c(-1, 1, 1),  "E"="v10",  "T"=c("AB", "B", "A")),
+-                                rout1 = list("R"=c("I"),           "C"=c(-1),        "E"="v10",  "T"=c("A")),
+-                                rout2 = list("R"=c("J"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-              meta_conc_subnet = c("H"=1, "I"=0.5, "J"=0.5, "K"=1),
+-              kp_subnet = c("v10"=0.5),
+-              te_subnet = c("v10", "I", "J"),
+-              te_upc_subnet = c("v10"=10, "I"=100, "J"=100),
+-              te_loc_subnet = c("v10"=1e-4, "I"=0.01, "J"=0.01),
+-              sd_meas = list(iso=0.02, conc=c("I"=0.01, "J"=0.01)),
+-              times = times,
+-              enr_in = enr_in,
+-              niter = mc_iter,
+-              mc.cores = NULL,
+-              data_meas_subnet = list(conc=c("I"=0.5, "J"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("I_1", "J_1")]))),
+-    S15 = list(name = "S15",
+-               rxn_subnet = list(r12  = list("R"=c("H", "I", "J"), "C"=c(-1, 1, 1),  "E"="v10",  "T"=c("AB", "B", "A")),
+-                                 r13  = list("R"=c("I", "K"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("B", "B")),
+-                                 rout1 = list("R"=c("J"),           "C"=c(-1),        "E"="v10",  "T"=c("A")),
+-                                 rout2 = list("R"=c("K"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-               meta_conc_subnet = c("H"=1, "I"=0.5, "J"=0.5, "K"=0.5),
+-               kp_subnet = c("v10"=0.5),
+-               te_subnet = c("v10", "I", "J", "K"),
+-               te_upc_subnet = c("v10"=10, "I"=100, "J"=100, "K"=100),
+-               te_loc_subnet = c("v10"=1e-4, "I"=0.01, "J"=0.01, "K"=0.01),
+-               sd_meas = list(iso=0.02, conc=c("I"=0.01, "J"=0.01, "K"=0.01)),
+-               times = times,
+-               enr_in = enr_in,
+-               niter = mc_iter,
+-               mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("I"=0.5, "J"=0.5, "K"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("I_1", "J_1", "K_1")]))),
+-    S16 = list(name = "S16",
+-               rxn_subnet = list(r12  = list("R"=c("H", "I", "J"), "C"=c(-1, 1, 1),  "E"="v10",  "T"=c("AB", "B", "A")),
+-                                 r13  = list("R"=c("I", "K"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("B", "B")),
+-                                 r14  = list("R"=c("J", "L"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 rout1 = list("R"=c("L"),           "C"=c(-1),        "E"="v10",  "T"=c("A")),
+-                                 rout2 = list("R"=c("K"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-               meta_conc_subnet = c("H"=1, "I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5),
+-               kp_subnet = c("v10"=0.5),
+-               te_subnet = c("v10", "I", "J", "K", "L"),
+-               te_upc_subnet = c("v10"=10, "I"=100, "J"=100, "K"=100, "L"=100),
+-               te_loc_subnet = c("v10"=1e-4, "I"=0.01, "J"=0.01, "K"=0.01, "L"=0.01),
+-               sd_meas = list(iso=0.02, conc=c("I"=0.01, "J"=0.01, "K"=0.01, "L"=0.01)),
+-               times = times,
+-               enr_in = enr_in,
+-               niter = mc_iter,
+-               mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("I_1", "J_1", "K_1", "L_1")]))),
+-    S17 = list(name = "S17",
+-               rxn_subnet = list(r12  = list("R"=c("H", "I", "J"), "C"=c(-1, 1, 1),  "E"="v10",  "T"=c("AB", "B", "A")),
+-                                 r13  = list("R"=c("I", "K"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("B", "B")),
+-                                 r14  = list("R"=c("J", "L"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 r15  = list("R"=c("L", "M"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 rout1 = list("R"=c("M"),           "C"=c(-1),        "E"="v10",  "T"=c("A")),
+-                                 rout2 = list("R"=c("K"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-               meta_conc_subnet = c("H"=1, "I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5, "M"=0.5),
+-               kp_subnet = c("v10"=0.5),
+-               te_subnet = c("v10", "I", "J", "K", "L", "M"),
+-               te_upc_subnet = c("v10"=10, "I"=100, "J"=100, "K"=100, "L"=100, "M"=100),
+-               te_loc_subnet = c("v10"=1e-4, "I"=0.01, "J"=0.01, "K"=0.01, "L"=0.01, "M"=0.01),
+-               sd_meas = list(iso=0.02, conc=c("I"=0.01, "J"=0.01, "K"=0.01, "L"=0.01, "M"=0.01)),
+-               times = times,
+-               enr_in = enr_in,
+-               niter = mc_iter,
+-               mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5, "M"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("I_1", "J_1", "K_1", "L_1", "M_1")]))),
+-    S18 = list(name = "S18",
+-               rxn_subnet = list(r12  = list("R"=c("H", "I", "J"), "C"=c(-1, 1, 1),  "E"="v10",  "T"=c("AB", "B", "A")),
+-                                 r13  = list("R"=c("I", "K"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 r14  = list("R"=c("J", "L"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 r15  = list("R"=c("L", "M"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 r16  = list("R"=c("M", "N"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 rout1 = list("R"=c("N"),           "C"=c(-1),        "E"="v10",  "T"=c("A")),
+-                                 rout2 = list("R"=c("K"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-               meta_conc_subnet = c("H"=1, "I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5, "M"=0.5, "N"=0.5),
+-               kp_subnet = c("v10"=0.5),
+-               te_subnet = c("v10", "I", "J", "K", "L", "M", "N"),
+-               te_upc_subnet = c("v10"=10, "I"=100, "J"=100, "K"=100, "L"=100, "M"=100, "N"=100),
+-               te_loc_subnet = c("v10"=1e-4, "I"=0.01, "J"=0.01, "K"=0.01, "L"=0.01, "M"=0.01, "N"=0.01),
+-               sd_meas = list(iso=0.02, conc=c("I"=0.01, "J"=0.01, "K"=0.01, "L"=0.01, "M"=0.01, "N"=0.01)),
+-               times = times,
+-               enr_in = enr_in,
+-               niter = mc_iter,
+-               mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5, "M"=0.5, "N"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("I_1", "J_1", "K_1", "L_1", "M_1", "N_1")]))),
+-    S19 = list(name = "S19",
+-               rxn_subnet = list(r13  = list("R"=c("I", "K"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 rout = list("R"=c("K"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-               meta_conc_subnet = c("I"=1, "K"=0.5),
+-               kp_subnet = c("v10"=0.5),
+-               te_subnet = c("v10", "K"),
+-               te_upc_subnet = c("v10"=10, "K"=100),
+-               te_loc_subnet = c("v10"=1e-4, "K"=0.01),
+-               sd_meas = list(iso=0.02, conc=c("K"=0.01)),
+-               times = times,
+-               enr_in = enr_in,
+-               niter = mc_iter,
+-               mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("K"=0.5), iso=cbind(times, "K_1"=res$res_dyn$enrichments[, "K_1"]))),
+-    S20 = list(name = "S20",
+-               rxn_subnet = list(r11  = list("R"=c("G", "K", "H"), "C"=c(-1, -1, 1), "E"="v10",  "T"=c("A", "B", "BA")),
+-                                 r13  = list("R"=c("I", "K"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 rout = list("R"=c("H"),           "C"=c(-1),        "E"="v10",  "T"=c("AB"))),
+-               meta_conc_subnet = c("G"=1, "H"=0.5, "I"=1, "K"=0.5),
+-               kp_subnet = c("v10"=0.5),
+-               te_subnet = c("v10", "H", "K"),
+-               te_upc_subnet = c("v10"=10, "H"=100, "K"=100),
+-               te_loc_subnet = c("v10"=1e-4, "H"=0.01, "K"=0.01),
+-               sd_meas = list(iso=0.02, conc=c("H"=0.01, "K"=0.01)),
+-               times = times,
+-               enr_in = enr_in,
+-               niter = mc_iter,
+-               mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("H"=0.5, "K"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("H_1-2", "K_1")]))),
+-    S21 = list(name = "S21",
+-               rxn_subnet = list(r12  = list("R"=c("H", "I", "J"), "C"=c(-1, 1, 1),  "E"="v10",  "T"=c("AB", "B", "A")),
+-                                 r14  = list("R"=c("J", "L"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 rout1 = list("R"=c("L"),           "C"=c(-1),        "E"="v10",  "T"=c("A")),
+-                                 rout2 = list("R"=c("I"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-               meta_conc_subnet = c("H"=1, "I"=0.5, "J"=0.5, "L"=0.5),
+-               kp_subnet = c("v10"=0.5),
+-               te_subnet = c("v10", "I", "J", "L"),
+-               te_upc_subnet = c("v10"=10, "I"=100, "J"=100, "L"=100),
+-               te_loc_subnet = c("v10"=1e-4, "I"=0.01, "J"=0.01, "L"=0.01),
+-               sd_meas = list(iso=0.02, conc=c("I"=0.01, "J"=0.01, "L"=0.01)),
+-               times = times,
+-               enr_in = enr_in,
+-               niter = mc_iter,
+-               mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("I"=0.5, "J"=0.5, "L"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("I_1", "J_1", "L_1")]))),
+-    S22 = list(name = "S22",
+-               rxn_subnet = list(r12  = list("R"=c("H", "I", "J"), "C"=c(-1, 1, 1),  "E"="v10",  "T"=c("AB", "B", "A")),
+-                                 r14  = list("R"=c("J", "L"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 r15  = list("R"=c("L", "M"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 rout1 = list("R"=c("M"),           "C"=c(-1),        "E"="v10",  "T"=c("A")),
+-                                 rout2 = list("R"=c("I"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-               meta_conc_subnet = c("H"=1, "I"=0.5, "J"=0.5, "L"=0.5, "M"=0.5),
+-               kp_subnet = c("v10"=0.5),
+-               te_subnet = c("v10", "I", "J", "L", "M"),
+-               te_upc_subnet = c("v10"=10, "I"=100, "J"=100, "L"=100, "M"=100),
+-               te_loc_subnet = c("v10"=1e-4, "I"=0.01, "J"=0.01, "L"=0.01, "M"=0.01),
+-               sd_meas = list(iso=0.02, conc=c("I"=0.01, "J"=0.01, "L"=0.01, "M"=0.01)),
+-               times = times,
+-               enr_in = enr_in,
+-               niter = mc_iter,
+-               mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("I"=0.5, "J"=0.5, "L"=0.5, "M"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("I_1", "J_1", "L_1", "M_1")]))),
+-    S23 = list(name = "S23",
+-               rxn_subnet = list(r12  = list("R"=c("H", "I", "J"), "C"=c(-1, 1, 1),  "E"="v10",  "T"=c("AB", "B", "A")),
+-                                 r14  = list("R"=c("J", "L"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 r15  = list("R"=c("L", "M"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 r16  = list("R"=c("M", "N"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 rout1 = list("R"=c("N"),           "C"=c(-1),        "E"="v10",  "T"=c("A")),
+-                                 rout2 = list("R"=c("I"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-               meta_conc_subnet = c("H"=1, "I"=0.5, "J"=0.5, "L"=0.5, "M"=0.5, "N"=0.5),
+-               kp_subnet = c("v10"=0.5),
+-               te_subnet = c("v10", "I", "J", "L", "M", "N"),
+-               te_upc_subnet = c("v10"=10, "I"=100, "J"=100, "L"=100, "M"=100, "N"=100),
+-               te_loc_subnet = c("v10"=1e-4, "I"=0.01, "J"=0.01, "L"=0.01, "M"=0.01, "N"=0.01),
+-               sd_meas = list(iso=0.02, conc=c("I"=0.01, "J"=0.01, "L"=0.01, "M"=0.01, "N"=0.01)),
+-               times = times,
+-               enr_in = enr_in,
+-               niter = mc_iter,
+-               mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("I"=0.5, "J"=0.5, "L"=0.5, "M"=0.5, "N"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("I_1", "J_1", "L_1", "M_1", "N_1")]))),
+-    S24 = list(name = "S24",
+-               rxn_subnet = list(r14  = list("R"=c("J", "L"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 rout = list("R"=c("L"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-               meta_conc_subnet = c("J"=1, "L"=0.5),
+-               kp_subnet = c("v10"=0.5),
+-               te_subnet = c("v10", "L"),
+-               te_upc_subnet = c("v10"=10, "L"=100),
+-               te_loc_subnet = c("v10"=1e-4, "L"=0.01),
+-               sd_meas = list(iso=0.02, conc=c("L"=0.01)),
+-               times = times,
+-               enr_in = enr_in,
+-               niter = mc_iter,
+-               mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("L"=0.5), iso=cbind(times, "L_1"=res$res_dyn$enrichments[, "L_1"]))),
+-    S25 = list(name = "S25",
+-               rxn_subnet = list(r14  = list("R"=c("J", "L"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 r15  = list("R"=c("L", "M"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 rout = list("R"=c("M"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-               meta_conc_subnet = c("J"=1, "L"=0.5, "M"=0.5),
+-               kp_subnet = c("v10"=0.5),
+-               te_subnet = c("v10", "L", "M"),
+-               te_upc_subnet = c("v10"=10, "L"=100, "M"=100),
+-               te_loc_subnet = c("v10"=1e-4, "L"=0.01, "M"=0.01),
+-               sd_meas = list(iso=0.02, conc=c("L"=0.01, "M"=0.01)),
+-               times = times,
+-               enr_in = enr_in,
+-               niter = mc_iter,
+-               mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("L"=0.5, "M"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("L_1", "M_1")]))),
+-    S26 = list(name = "S26",
+-               rxn_subnet = list(r14  = list("R"=c("J", "L"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 r15  = list("R"=c("L", "M"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 r16  = list("R"=c("M", "N"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 rout = list("R"=c("N"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-               meta_conc_subnet = c("J"=1, "L"=0.5, "M"=0.5, "N"=0.5),
+-               kp_subnet = c("v10"=0.5),
+-               te_subnet = c("v10", "L", "M", "N"),
+-               te_upc_subnet = c("v10"=10, "L"=100, "M"=100, "N"=100),
+-               te_loc_subnet = c("v10"=1e-4, "L"=0.01, "M"=0.01, "N"=0.01),
+-               sd_meas = list(iso=0.02, conc=c("L"=0.01, "M"=0.01, "N"=0.01)),
+-               times = times,
+-               enr_in = enr_in,
+-               niter = mc_iter,
+-               mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("L"=0.5, "M"=0.5, "N"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("L_1", "M_1", "N_1")]))),
+-    S27 = list(name = "S27",
+-               rxn_subnet = list(r15  = list("R"=c("L", "M"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 rout = list("R"=c("M"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-               meta_conc_subnet = c("L"=1, "M"=0.5),
+-               kp_subnet = c("v10"=0.5),
+-               te_subnet = c("v10", "M"),
+-               te_upc_subnet = c("v10"=10, "M"=100),
+-               te_loc_subnet = c("v10"=1e-4, "M"=0.01),
+-               sd_meas = list(iso=0.02, conc=c("M"=0.01)),
+-               times = times,
+-               enr_in = enr_in,
+-               niter = mc_iter,
+-               mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("M"=0.5), iso=cbind(times, "M_1"=res$res_dyn$enrichments[, "M_1"]))),
+-    S28 = list(name = "S28",
+-               rxn_subnet = list(r15  = list("R"=c("L", "M"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 r16  = list("R"=c("M", "N"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 rout = list("R"=c("N"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-               meta_conc_subnet = c("L"=1, "M"=0.5, "N"=0.5),
+-               kp_subnet = c("v10"=0.5),
+-               te_subnet = c("v10", "M", "N"),
+-               te_upc_subnet = c("v10"=10, "M"=100, "N"=100),
+-               te_loc_subnet = c("v10"=1e-4, "M"=0.01, "N"=0.01),
+-               sd_meas = list(iso=0.02, conc=c("M"=0.01, "N"=0.01)),
+-               times = times,
+-               enr_in = enr_in,
+-               niter = mc_iter,
+-               mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("M"=0.5, "N"=0.5), iso=cbind(times, res$res_dyn$enrichments[, c("M_1", "N_1")]))),
+-    S29 = list(name = "S29",
+-               rxn_subnet = list(r16  = list("R"=c("M", "N"),      "C"=c(-1, 1),     "E"="v10",  "T"=c("A", "A")),
+-                                 rout = list("R"=c("N"),           "C"=c(-1),        "E"="v10",  "T"=c("A"))),
+-               meta_conc_subnet = c("M"=1, "N"=0.5),
+-               kp_subnet = c("v10"=0.5),
+-               te_subnet = c("v10", "N"),
+-               te_upc_subnet = c("v10"=10, "N"=100),
+-               te_loc_subnet = c("v10"=1e-4, "N"=0.01),
+-               sd_meas = list(iso=0.02, conc=c("N"=0.01)),
+-               times = times,
+-               enr_in = enr_in,
+-               niter = mc_iter,
+-               mc.cores = NULL,
+-               data_meas_subnet = list(conc=c("N"=0.5), iso=cbind(times, "N_1"=res$res_dyn$enrichments[, "N_1"])))
+-)
++pdf(file="Fig_new_2C_M_6.pdf", width=10, height=6)
++plot(x=times161,y=an_fun_res[["M_1-M1_6"]][[1]],type="l", ylim=c(0,1))
++for (i in seq(2,51)) { lines(x=times161,y=an_fun_res[["M_1-M1_6"]][[i]], ylim=c(0,1))}
++lines(x=times161,y=org_data[,"M_1-M1"], col="green",lwd=4, ylim=c(0,1))
++dev.off()
+ 
++pdf(file="Fig_new_2C_M_11.pdf", width=10, height=6)
++plot(x=times161,y=an_fun_res[["M_1-M1_11"]][[1]],type="l", ylim=c(0,1))
++for (i in seq(2,51)) { lines(x=times161,y=an_fun_res[["M_1-M1_11"]][[i]], ylim=c(0,1))}
++lines(x=times161,y=org_data[,"M_1-M1"], col="green",lwd=4, ylim=c(0,1))
++dev.off()
+ 
+-# calculate fluxes for all subsystems of the given flux module
+-res_sub_l2 <- fit_subsystems(subsystems_l2, dirname="fit_subsystems_r9-16", mc.cores=numCores)
++pdf(file="Fig_new_2C_M_21.pdf", width=10, height=6)
++plot(x=times161,y=an_fun_res[["M_1-M1_21"]][[1]],type="l", ylim=c(0,1))
++for (i in seq(2,51)) { lines(x=times161,y=an_fun_res[["M_1-M1_21"]][[i]], ylim=c(0,1))}
++lines(x=times161,y=org_data[,"M_1-M1"], col="green",lwd=4, ylim=c(0,1))
++dev.off()
+ 
+-# display results
+-res_sub_l2$summary
++pdf(file="Fig_new_2C_M_81.pdf", width=10, height=6)
++plot(x=times161,y=an_fun_res[["M_1-M1_81"]][[1]],type="l", ylim=c(0,1))
++for (i in seq(2,51)) { lines(x=times161,y=an_fun_res[["M_1-M1_81"]][[i]], ylim=c(0,1))}
++lines(x=times161,y=org_data[,"M_1-M1"], col="green",lwd=4, ylim=c(0,1))
++dev.off()
+ 
+-# get summary
+-list2file(res_sub_l2$summary, file="summary_subsystems_r9-16.txt")
+ 
+-####################################
+-cat("\n      ... plot results ...\n\n")
+-####################################
++pdf(file="Fig_new_2C_N_6.pdf", width=10, height=6)
++plot(x=times161,y=an_fun_res[["N_1-M1_6"]][[1]],type="l", ylim=c(0,1))
++for (i in seq(2,51)) { lines(x=times161,y=an_fun_res[["N_1-M1_6"]][[i]], ylim=c(0,1))}
++lines(x=times161,y=org_data[,"N_1-M1"], col="green",lwd=4, ylim=c(0,1))
++dev.off()
+ 
+-# create figure 4
+-pdf(file="Fig_4.pdf", width=10, height=10)
+-    par(mfrow=c(2,1))
+-    par(mar=c(5.1,4.1,4.1,2.1))
+-    # data used to plot Figure 4B
+-    msub <- c(1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-              0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-              0, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0,
+-              0, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-              0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0,
+-              0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0,
+-              0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1, 1,
+-              2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-              3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-              0, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 0, 3, 2, 2, 2, 0, 0, 0, 0, 0, 0,
+-              0, 0, 3, 3, 3, 3, 3, 0, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 3, 3, 3, 0, 0, 0, 0, 0, 0,
+-              0, 0, 3, 3, 3, 3, 3, 0, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 0, 0, 3, 3, 3, 2, 2, 2, 0, 0, 0,
+-              0, 2, 2, 3, 3, 3, 3, 2, 2, 3, 3, 3, 3, 0, 3, 3, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-              0, 0, 0, 0, 3, 3, 3, 0, 0, 0, 3, 3, 3, 0, 0, 3, 3, 3, 0, 0, 3, 3, 3, 3, 3, 3, 2, 2, 0,
+-              0, 0, 0, 0, 0, 3, 3, 0, 0, 0, 0, 3, 3, 0, 0, 0, 3, 3, 0, 0, 0, 3, 3, 0, 3, 3, 3, 3, 2,
+-              0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 3, 0, 0, 0, 0, 3, 0, 0, 3, 0, 3, 3)
+-    msub_c <- c("S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S11", "S12", "S13", "S14", "S15", "S16", "S17", "S18", "S19", "S20", "S21", "S22", "S23", "S24", "S25", "S26", "S27", "S28", "S29")
+-    msub_r <- c("r10", "r11", "r12", "r13", "r14", "r15", "r16", "E", "G", "H", "I", "J", "K", "L", "M", "N")
+-    subs <- matrix(msub, nrow=length(msub_r), ncol=length(msub_c), dimnames=list(row=msub_r, col=msub_c), byrow = TRUE)
+-    # gather flux calculation results to plot Figure 4C
+-    all_cols2 <- fun_col(length(res_sub_l2$res))
+-    cols2 <- c()
+-    data_plot2 <- list()
+-    opt2 <- c()
+-    for (i in seq(length(res_sub_l2$res))){
+-        ncol2 <- grep("v", colnames(res_sub_l2$res[[i]]$sens$par))
+-        cols2 <- c(cols2, rep(all_cols2[i], length(ncol2)))
+-        no <- names(opt2)
+-        opt2 <- c(opt2, res_sub_l2$summary[[i]][ncol2, "opt"])
+-        names(opt2) <- c(no, names(res_sub_l2$res)[i])
+-        if (length(ncol2) == 1){
+-            data_plot2[[names(res_sub_l2$res)[i]]] <- res_sub_l2$res[[i]]$sens$par[,ncol2]
+-        }else if (length(ncol2)>1){
+-            data_plot2 <- c(data_plot2, as.list(as.data.frame(res_sub_l2$res[[i]]$sens$par[,ncol2])))
+-        }
+-    }
+-    # colors
+-    col_breaks <- c(-0.5, 0.5, 1.5, 2.5, 3.5)
+-    col_col <- c("white", "#8FBBDA", "#EB9394", "#96D096")
+-    # plot figure 4B
+-    data_hm <- list(z=t(apply(subs, 2, rev)), x=seq(ncol(subs)+1), y=seq(nrow(subs)+1))
+-    image(data_hm, axes=F, col=col_col, breaks=col_breaks)#, ylab=rownames(subs))
+-    axis(side=2, at=seq(nrow(subs))+0.5, labels=rev(rownames(subs)), las=2)
+-    text(x=seq(ncol(subs))+0.5, y=par("usr")[4]+0.5, labels = colnames(subs), srt = 45, adj = c(0,0), xpd = TRUE, cex=1)
+-    for (i in seq(nrow(subs))){abline(h=i)}
+-    for (i in seq(ncol(subs))){abline(v=i)}
+-    box()
+-    # plot figure 4C
+-    par(mar=c(5.1,4.1,4.1,2.1))
+-    vioplot(data_plot2, names=names(data_plot2), col="#CAB3DE", las=2, ylim=c(0,1.2), yaxt="n", xaxt="n", xlim=c(0, length(data_plot2)), outline=FALSE, axes=FALSE, xaxs="i", at=-1+seq(length(data_plot2)))
+-    axis(side=2, at=seq(0, 1.2, by=0.2), las=2)
+-    mtext("estimated flux", side = 2, line=2.5, at=0.6)
+-    # true value: flux=1.0
+-    abline(h=1)
++pdf(file="Fig_new_2C_N_11.pdf", width=10, height=6)
++plot(x=times161,y=an_fun_res[["N_1-M1_11"]][[1]],type="l", ylim=c(0,1))
++for (i in seq(2,51)) { lines(x=times161,y=an_fun_res[["N_1-M1_11"]][[i]], ylim=c(0,1))}
++lines(x=times161,y=org_data[,"N_1-M1"], col="green",lwd=4, ylim=c(0,1))
+ dev.off()
+ 
+-# go back to the initial working directory
+-setwd(wd)
++pdf(file="Fig_new_2C_N_21.pdf", width=10, height=6)
++plot(x=times161,y=an_fun_res[["N_1-M1_21"]][[1]],type="l", ylim=c(0,1))
++for (i in seq(2,51)) { lines(x=times161,y=an_fun_res[["N_1-M1_21"]][[i]], ylim=c(0,1))}
++lines(x=times161,y=org_data[,"N_1-M1"], col="green",lwd=4, ylim=c(0,1))
++dev.off()
+ 
++pdf(file="Fig_new_2C_N_81.pdf", width=10, height=6)
++plot(x=times161,y=an_fun_res[["N_1-M1_81"]][[1]],type="l", ylim=c(0,1))
++for (i in seq(2,51)) { lines(x=times161,y=an_fun_res[["N_1-M1_81"]][[i]], ylim=c(0,1))}
++lines(x=times161,y=org_data[,"N_1-M1"], col="green",lwd=4, ylim=c(0,1))
++dev.off()
+ 
+-####################################
+-cat("\nDone.\n")
+-####################################
++
++flux_names =      c("v4",   "v9",   "v18",    "v17")
++subsystem_names = c("v4_v9", "v4_v9", "v18_v17", "v18_v17")
++fluxratio_fluxes <- c(v4=0.3, v9=0.7, v18=1, v17=1)
++
++fluxratio_estimate_data = list()
++for (fn_i in seq(length(flux_names))) {
++    for (tp in c("6", "11", "21", "81")) {
++        fluxratio_sub_tp = paste0(flux_names[fn_i],"_",tp)
++        fluxratio_estimate_data[[fluxratio_sub_tp]] = c()
++        for (i in seq(1,101)) {
++            fluxratio_estimate_data[[fluxratio_sub_tp]][i] = all_res_ratio[[tp]][[as.character(i)]][[subsystem_names[fn_i]]]$m$getPars()[(fn_i+1)%%2 + 1]
++        }
++    }
++}
++
++log_fluxratio_estimate_data = list();
++for (fn_tp in names(fluxratio_estimate_data)) { 
++    log_fluxratio_estimate_data[[fn_tp]] = log(fluxratio_estimate_data[[fn_tp]],10);  
++    log_fluxratio_estimate_data[[fn_tp]][log_fluxratio_estimate_data[[fn_tp]]<(-4)] = -4
++}
++
++pdf(file="Fig_5d.pdf", width=10, height=6)
++colors = rep(fun_col(4), each=4)
++for (c_i in seq(length(colors))) {
++    colors[c_i] = paste0(colors[c_i], as.hexmode(80+((c_i-1) %% 4)*48))
++}
++vioplot(log_fluxratio_estimate_data,col = colors, ylim=c(-4,1))
++true_values = rep(log(fluxratio_fluxes,10), each=4)
++points(true_values, pch=4, col="black", cex=3)
++dev.off()
+
