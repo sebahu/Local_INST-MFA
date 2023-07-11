@@ -4,17 +4,28 @@
 # https://doi.org/10.1101/735308
 # Path of the model
 
-for (level in seq(-1,-6)) {
-    this_files_name = sys.frame(-level)$srcfile;
-    if(!is.null(this_files_name)) {
-        setwd(dirname(test$filename))
-              break
+#from https://gist.github.com/jasonsychau/ff6bc78a33bf3fd1c6bd4fa78bbf42e7
+stub <- function() {}
+thisPath <- function() {
+  cmdArgs <- commandArgs(trailingOnly = FALSE)
+  if (length(grep("^-f$", cmdArgs)) > 0) {
+    # R console option
+    normalizePath(dirname(cmdArgs[grep("^-f", cmdArgs) + 1]))[1]
+  } else if (length(grep("^--file=", cmdArgs)) > 0) {
+    # Rscript/R console option
+    scriptPath <- normalizePath(dirname(sub("^--file=", "", cmdArgs[grep("^--file=", cmdArgs)])))[1]
+  } else if (Sys.getenv("RSTUDIO") == "1") {
+    # RStudio
+    dirname(rstudioapi::getSourceEditorContext()$path)
+  } else if (is.null(attr(stub, "srcref")) == FALSE) {
+    # 'source'd via R console
+    dirname(normalizePath(attr(attr(stub, "srcref"), "srcfile")$filename))
+  } else {
+    stop("Cannot find file path")
     }
 }
 
-if(is.null(this_files_name)) {
-    print(paste0("Could not determine folder of current script, wd stays: ",getwd()))
-}
+setwd(thisPath())
 
 setup_env <- function() {
 
@@ -23,6 +34,7 @@ setup_env <- function() {
     
     library("vioplot")
 
+    wd = getwd()
     # Load IsoSim
     setwd(file.path(dirname(dirname(wd)), "isosim"))
     source("isosim.R")
