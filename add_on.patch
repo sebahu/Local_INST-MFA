@@ -72,14 +72,6 @@
 -    if (res_i$value < resopt$value){
 -      resopt <- res_i
 -      funSet <- list(sim=fn_doublelogistic, eq=fn_doublelogistic_eq)
--    }
--  }
--  for (i in seq(niter)){
--    par <- fn_enr_logistic_parinit(id, times=times)
--    res_i <- psoptim(par=par$par, fn=cost_labin_enr, lower=par$lower, upper = par$upper, control=ctrl, id=id, times=times, fun_dyn=fn_enr_logistic)
--    if (res_i$value < resopt$value){
--      resopt <- res_i
--      funSet <- list(sim=fn_enr_logistic, eq=fn_enr_logistic_eq)
 +  if (!.GlobalEnv$use_only_logistic && !.GlobalEnv$use_only_kfp) {
 +    print("double_logistic")
 +    for (i in seq(niter)){
@@ -89,8 +81,14 @@
 +        resopt <- res_i
 +        funSet <- list(sim=fn_doublelogistic, eq=fn_doublelogistic_eq)
 +      }
-+    }
-+  }
+     }
+   }
+-  for (i in seq(niter)){
+-    par <- fn_enr_logistic_parinit(id, times=times)
+-    res_i <- psoptim(par=par$par, fn=cost_labin_enr, lower=par$lower, upper = par$upper, control=ctrl, id=id, times=times, fun_dyn=fn_enr_logistic)
+-    if (res_i$value < resopt$value){
+-      resopt <- res_i
+-      funSet <- list(sim=fn_enr_logistic, eq=fn_enr_logistic_eq)
 +  if (!.GlobalEnv$use_only_double_logistic && !.GlobalEnv$use_only_kfp) {
 +    for (i in seq(niter)){
 +      par <- fn_enr_logistic_parinit(id, times=times)
@@ -175,26 +173,38 @@
  ####################################
  
  ####################################
-@@ -29,7 +22,17 @@
+@@ -28,8 +21,28 @@
+ 
  library("vioplot")
  
- # Path of the example model
+-# Path of the example model
 -#setwd("C:/Users/millard/Documents/GIT/IsoSim/IsoSim/models/example_network")
-+for (level in seq(-1,-6)) {
-+     this_files_name = sys.frame(-level)$srcfile;
-+     if(!is.null(this_files_name)) {
-+       setwd(dirname(test$filename))
-+       break
-+     }
++#from https://gist.github.com/jasonsychau/ff6bc78a33bf3fd1c6bd4fa78bbf42e7
++stub <- function() {}
++thisPath <- function() {
++  cmdArgs <- commandArgs(trailingOnly = FALSE)
++  if (length(grep("^-f$", cmdArgs)) > 0) {
++    # R console option
++    normalizePath(dirname(cmdArgs[grep("^-f", cmdArgs) + 1]))[1]
++  } else if (length(grep("^--file=", cmdArgs)) > 0) {
++    # Rscript/R console option
++    scriptPath <- normalizePath(dirname(sub("^--file=", "", cmdArgs[grep("^--file=", cmdArgs)])))[1]
++  } else if (Sys.getenv("RSTUDIO") == "1") {
++    # RStudio
++    dirname(rstudioapi::getSourceEditorContext()$path)
++  } else if (is.null(attr(stub, "srcref")) == FALSE) {
++    # 'source'd via R console
++    dirname(normalizePath(attr(attr(stub, "srcref"), "srcfile")$filename))
++  } else {
++    stop("Cannot find file path")
++  }
 +}
 +
-+if(is.null(this_files_name)) {
-+  print(paste0("Could not determine folder of current script, wd stays: ",getwd()))
-+}
++setwd(thisPath())
  
  # Get current directory
  wd <- getwd()
-@@ -55,7 +58,18 @@
+@@ -55,7 +68,18 @@
  numCores <- detectCores()
  
  # number of Monte Carlo iterations for flux calculation
@@ -214,12 +224,13 @@
  
  
  ####################################
-@@ -118,13 +132,14 @@
+@@ -118,13 +142,15 @@
  
  # fluxes and metabolite concentrations
  fluxes <- c("v1"=2, "v2"=1.5, "v6"=1.2, "v10"=1.0, "v6xch"=0.2)
 -meta_conc <- c("Sout"=1, "Sin"=0.5, "A"=0.5, "B"=0.5, "C"=0.5, "D"=0.5, "E"=0.5, "F"=0.5, "G"=0.5, "H"=0.5, "I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5, "M"=0.5, "N"=0.5, "O"=0.5, "P"=20)
 +meta_conc_org <- c("Sout"=1, "Sin"=0.5, "A"=0.5, "B"=0.5, "C"=0.5, "D"=0.5, "E"=0.5, "F"=0.5, "G"=0.5, "H"=0.5, "I"=0.5, "J"=0.5, "K"=0.5, "L"=0.5, "M"=0.5, "N"=0.5, "O"=0.5, "P"=20)
++meta_conc = meta_conc_org
 +all_mets = c("Sout_1", "Sin_1", "A_1", "B_1", "C_1", "D_1", "E_1", "F_1", "G_1", "H_1-2", "H_2", "H_1", "I_1", "J_1", "K_1", "L_1", "M_1", "N_1", "O_1")
  
  # simulation times (exponential sampling frequency from 0 to 15 min)
@@ -232,13 +243,14 @@
                  kp        = fluxes,
                  anFun     = anFun,
                  p         = 0.0,
-@@ -132,26 +147,24 @@
+@@ -132,26 +158,24 @@
                  meta_conc = meta_conc,
                  method    = "FORTRAN",
                  unloadDll = TRUE,
 -                times     = times)
+-
 +                times     = times161)
- 
++res_sim161 = res_sim161_org
 +subset_times = seq(1,161,5)
  
 +run_fit_input <- function() {
@@ -268,7 +280,7 @@
  subsystems <- list(
      s1 = list(name = "s1",
                rxn_subnet = list(r1   = list("R"=c("Sout", "Sin"), "C"=c(-1, 1), "E"="v1", "T"=c("A", "A")),
-@@ -167,7 +180,7 @@
+@@ -167,7 +191,7 @@
                anFun = NULL,
                niter = mc_iter,
                mc.cores = NULL,
@@ -277,7 +289,7 @@
      
      s2 = list(name = "s2",
                rxn_subnet = list(r2   = list("R"=c("Sin", "A"), "C"=c(-1, 1), "E"="v2", "T"=c("A", "A")),
-@@ -183,7 +196,7 @@
+@@ -183,7 +207,7 @@
                anFun = NULL,
                niter = mc_iter,
                mc.cores = NULL,
@@ -286,7 +298,7 @@
      
      s3 = list(name = "s3",
                rxn_subnet = list(r3   = list("R"=c("Sin", "D"), "C"=c(-1, 1), "E"="v3", "T"=c("A", "A")),
-@@ -199,7 +212,7 @@
+@@ -199,7 +223,7 @@
                anFun = NULL,
                niter = mc_iter,
                mc.cores = NULL,
@@ -295,7 +307,7 @@
      
      s4_9 = list(name = "s4_9",
                  rxn_subnet = list(r4   = list("R"=c("A", "F"), "C"=c(-1, 1), "E"="v4",    "T"=c("A", "A")),
-@@ -216,7 +229,7 @@
+@@ -216,7 +240,7 @@
                  anFun = NULL,
                  niter = mc_iter,
                  mc.cores = NULL,
@@ -304,7 +316,7 @@
      
      s5 = list(name = "s5",
                rxn_subnet = list(r5    = list("R"=c("A", "B"), "C"=c(-1, 1), "E"="v5",     "T"=c("A", "A")),
-@@ -233,7 +246,7 @@
+@@ -233,7 +257,7 @@
                anFun = NULL,
                niter = mc_iter,
                mc.cores = NULL,
@@ -313,7 +325,7 @@
      
      s6_7 = list(name = "s6_7",
                  rxn_subnet = list(r6for = list("R"=c("B", "C"), "C"=c(-1, 1), "E"="v6f",    "T"=c("A", "A")),
-@@ -250,7 +263,7 @@
+@@ -250,7 +274,7 @@
                  anFun = NULL,
                  niter = mc_iter,
                  mc.cores = NULL,
@@ -322,7 +334,7 @@
      
      s8 = list(name = "s8",
                rxn_subnet = list(r8     = list("R"=c("C", "E"), "C"=c(-1, 1), "E"="v8",      "T"=c("A", "A")),
-@@ -266,7 +279,7 @@
+@@ -266,7 +290,7 @@
                anFun = NULL,
                niter = mc_iter,
                mc.cores = NULL,
@@ -331,7 +343,7 @@
      
      s10 = list(name = "s10",
                 rxn_subnet = list(r10for = list("R"=c("E", "G"), "C"=c(-1, 1), "E"="v10", "T"=c("A", "A")),
-@@ -282,7 +295,7 @@
+@@ -282,7 +306,7 @@
                 anFun = NULL,
                 niter = mc_iter,
                 mc.cores = NULL,
@@ -340,7 +352,7 @@
      
      s11 = list(name = "s11",
                 rxn_subnet = list(r11  = list("R"=c("G", "K", "H"), "C"=c(-1, -1, 1), "E"="v11", "T"=c("A", "B", "AB")),
-@@ -298,7 +311,7 @@
+@@ -298,7 +322,7 @@
                 anFun = NULL,
                 niter = mc_iter,
                 mc.cores = NULL,
@@ -349,7 +361,7 @@
      
      s12 = list(name = "s12",
                 rxn_subnet = list(r12   = list("R"=c("H", "I", "J"),"C"=c(-1, 1, 1), "E"="v12", "T"=c("AB", "B", "A")),
-@@ -315,7 +328,7 @@
+@@ -315,7 +339,7 @@
                 anFun = NULL,
                 niter = mc_iter,
                 mc.cores = NULL,
@@ -358,7 +370,7 @@
      
      s13 = list(name = "s13",
                 rxn_subnet = list(r13  = list("R"=c("I", "K"), "C"=c(-1, 1), "E"="v13", "T"=c("A", "A")),
-@@ -331,7 +344,7 @@
+@@ -331,7 +355,7 @@
                 anFun = NULL,
                 niter = mc_iter,
                 mc.cores = NULL,
@@ -367,7 +379,7 @@
      
      s14 = list(name = "s14",
                 rxn_subnet = list(r14  = list("R"=c("J", "L"), "C"=c(-1, 1), "E"="v14", "T"=c("A", "A")),
-@@ -347,7 +360,7 @@
+@@ -347,7 +371,7 @@
                 anFun = NULL,
                 niter = mc_iter,
                 mc.cores = NULL,
@@ -376,7 +388,7 @@
      
      s15 = list(name = "s15",
                 rxn_subnet = list(r15  = list("R"=c("L", "M"), "C"=c(-1, 1), "E"="v15", "T"=c("A", "A")),
-@@ -363,7 +376,7 @@
+@@ -363,7 +387,7 @@
                 anFun = NULL,
                 niter = mc_iter,
                 mc.cores = NULL,
@@ -385,7 +397,7 @@
      
      s16 = list(name = "s16",
                 rxn_subnet = list(r16  = list("R"=c("M", "N"), "C"=c(-1, 1), "E"="v16", "T"=c("A", "A")),
-@@ -379,7 +392,7 @@
+@@ -379,7 +403,7 @@
                 anFun = NULL,
                 niter = mc_iter,
                 mc.cores = NULL,
@@ -394,7 +406,7 @@
      
      s17_18 = list(name = "s17_18",
                    rxn_subnet = list(r17  = list("R"=c("N", "O"), "C"=c(-1, 1), "E"="v17",     "T"=c("A", "A")),
-@@ -396,7 +409,7 @@
+@@ -396,7 +420,7 @@
                    anFun = NULL,
                    niter = mc_iter,
                    mc.cores = NULL,
@@ -403,7 +415,7 @@
      
      s19 = list(name = "s19",
                 rxn_subnet = list(r19  = list("R"=c("O", "P"), "C"=c(-1, 1), "E"="v19", "T"=c("A", "A")),
-@@ -412,654 +425,459 @@
+@@ -412,654 +436,458 @@
                 anFun = NULL,
                 niter = mc_iter,
                 mc.cores = NULL,
@@ -485,7 +497,6 @@
 +        print(paste0("Run #",as.character(mc_run), " for  " ,name, " timepoints"))
 +        run_fit_input()
 +        all_enr_in[[name]][[as.character(mc_run)]] = enr_in
-+        enr_in = all_enr_in_1_101[[name]][[as.character(mc_run)]]
 +        res_iso = run_one_estimation()
 +        all_res_iso[[name]][[as.character(mc_run)]] = res_iso
 +        res_kfp = estimate_kfp()
@@ -740,11 +751,11 @@
 +        subset_times = timepoint_selections[[name]]
 +        print(paste0("Run #",as.character(mc_run), " for  " ,name, " timepoints"))
 +        enr_input <- array(seq(5*length(subset_times)), dim=c(length(subset_times),5))
-+        enr_input[,1] = all_enr_in_1_101[[name]][[as.character(i)]][["all"]][["A_1"]][["exp"]]
-+        enr_input[,2] = all_enr_in_1_101[[name]][[as.character(i)]][["all"]][["D_1"]][["exp"]]
-+        enr_input[,3] = all_enr_in_1_101[[name]][[as.character(i)]][["all"]][["H_1"]][["exp"]]
-+        enr_input[,4] = all_enr_in_1_101[[name]][[as.character(i)]][["all"]][["L_1"]][["exp"]]
-+        enr_input[,5] = all_enr_in_1_101[[name]][[as.character(i)]][["all"]][["O_1"]][["exp"]]
++        enr_input[,1] = all_enr_in[[name]][[as.character(i)]][["all"]][["A_1"]][["exp"]]
++        enr_input[,2] = all_enr_in[[name]][[as.character(i)]][["all"]][["D_1"]][["exp"]]
++        enr_input[,3] = all_enr_in[[name]][[as.character(i)]][["all"]][["H_1"]][["exp"]]
++        enr_input[,4] = all_enr_in[[name]][[as.character(i)]][["all"]][["L_1"]][["exp"]]
++        enr_input[,5] = all_enr_in[[name]][[as.character(i)]][["all"]][["O_1"]][["exp"]]
 +        colnames(enr_input) = c("A_1", "D_1", "H_1", "L_1", "O_1")
 +        #print(enr_input)
 +         .GlobalEnv$use_only_double_logistic <- TRUE
@@ -1478,4 +1489,4 @@
 +true_values = rep(log(fluxratio_fluxes,10), each=4)
 +points(true_values, pch=4, col="black", cex=3)
 +dev.off()
-
+ 
