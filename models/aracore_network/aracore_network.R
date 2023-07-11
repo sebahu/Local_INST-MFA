@@ -912,15 +912,6 @@ run_one_estimation <- function() {
     return(res_sub)
 }
 
-estimate_flux_ratio <- function() {
-    formula_Thrzzc = enr_in$anFun[["Thrzzc_1"]][["Thrzzc_1-M1"]]
-    formula_Serzzc = enr_in$anFun[["Serzzc_1"]][["Serzzc_1-M1"]]
-    formula_Glyzzc = enr_in$anFun[["Glyzzc_1"]][["Glyzzc_1-M1"]]
-    ratio_res_s193_242 = fluxratio_simple(times[subset_times], formula_Thrzzc, formula_Serzzc, res$res_dyn$enrichments[subset_times, "Glyzzc_1"], formula_Glyzzc)
-    return (ratio_res_s193_242)
-}
-
-
 setup_env()
 init_aracore_model()
 simulate_aracore_model()
@@ -942,6 +933,28 @@ all_res_kfp = list(list(), list(), list(), list())
 names(all_res_kfp) = c("6", "11", "21", "81")
 all_res_ratio = list(list(), list(), list(), list())
 names(all_res_ratio) = c("6", "11", "21", "81")
+
+
+kfp_subsystems = list(r248=c(s="AGNzzh", p="Phezzh"), r216=c(s="Gluzzh", p="Ilezzh"), 
+                      r241=c(s="HxxCyszzc", p="Metzzc"), r168=c(s="Gluzzh", p="Aspzzh"))
+
+estimate_kfp <- function() {
+  kfp_res = list()
+  for (kfp_sub in names(kfp_subsystems)) {
+    v_part = t(enr_in[["all"]][[paste0(kfp_subsystems[[kfp_sub]][["s"]],"_1")]]$exp)
+    w_part = t(enr_in[["all"]][[paste0(kfp_subsystems[[kfp_sub]][["p"]], "_1")]]$exp)
+    kfp_res[[kfp_sub]] = kfp_simple(times[subset_times], 1-v_part, 1-w_part)
+  }
+  return (kfp_res)
+}
+
+estimate_flux_ratio <- function() {
+  fluxratio_res = list()
+  fluxratio_res = fluxratio_simple3(times = times[subset_times], a_t = t(enr_in[["all"]][["Thrzzc_1"]]$exp), 
+                                    b_t = t(enr_in[["all"]][["Serzzc_1"]]$exp), z_t = t(enr_in[["all"]][["Glyzzc_1"]]$exp),
+                                    formula_z = enr_in$all[["Glyzzc_1"]]$anFun[["Glyzzc_1-M1"]], pz = meta_conc_org[["Glyzzc"]])
+  return(fluxratio_res)
+}
 
 for (mc_run in seq(mc_iter+1)) {
     meta_conc = meta_conc_org * meta_conc_rel_noise
@@ -967,20 +980,6 @@ for (mc_run in seq(mc_iter+1)) {
 end_time <- Sys.time()
 end_time - start_time
 
-
-kfp_subsystems = list(r248=c(s="AGNzzh", p="Phezzh"), r216=c(s="Gluzzh", p="Ilezzh"), 
-                      r241=c(s="HxxCyszzc", p="Metzzc"), r168=c(s="Gluzzh", p="Aspzzh"))
-
-estimate_kfp <- function() {
-    kfp_res = list()
-    for (kfp_sub in names(kfp_subsystems)) {
-        v_part = t(enr_in[["all"]][[paste0(kfp_subsystems[[kfp_sub]][["s"]],"_1")]]$exp)
-        w_part = t(enr_in[["all"]][[paste0(kfp_subsystems[[kfp_sub]][["p"]], "_1")]]$exp)
-        kfp_res[[kfp_sub]] = kfp_simple(times[subset_times], 1-v_part, 1-w_part)
-    }
-    return (kfp_res)
-}
-
 all_res_kfp = list(list(), list(), list(), list())
 names(all_res_kfp) = c("6", "11", "21", "81")
 
@@ -994,13 +993,6 @@ for (mc_run in seq(mc_iter+1)) {
     }
 }
 
-estimate_flux_ratio <- function() {
-    fluxratio_res = list()
-    fluxratio_res = fluxratio_simple3(times = times[subset_times], a_t = t(enr_in[["all"]][["Thrzzc_1"]]$exp), 
-                                                 b_t = t(enr_in[["all"]][["Serzzc_1"]]$exp), z_t = t(enr_in[["all"]][["Glyzzc_1"]]$exp),
-                                                 formula_z = enr_in$all[["Glyzzc_1"]]$anFun[["Glyzzc_1-M1"]], pz = meta_conc_org[["Glyzzc"]])
-    return(fluxratio_res)
-}
 
 all_res_ratio = list(list(), list(), list(), list())
 names(all_res_ratio) = c("6", "11", "21", "81")
